@@ -1,0 +1,2504 @@
+
+【NavalDLCTrajectorySupport.cs】
+﻿// Naval DLC 弹道支持
+// 完全反射实现
+// 无 DLC 时自动失效
+using System;
+using System.Collections;
+using System.Reflection;
+using TaleWorlds.Core;
+using TaleWorlds.Engine;
+using TaleWorlds.Library;
+using TaleWorlds.MountAndBlade;
+
+namespace ProjectileTrajectorySystem
+{
+    public class NavalDLCmBehavior : MissionLogic
+    {
+        public override void OnMissionTick(float dt)
+        {
+            // 只有在启用玩家弹道时才更新，并且至少有一种显示方式被启用
+            if (ProjectileTrajectorySettingsManager.Settings.EnableTrajectory &&
+                ProjectileTrajectorySettingsManager.Settings.PlayerTrajectory &&
+                (ProjectileTrajectorySettingsManager.Settings.UseGameEntityDisplay || ProjectileTrajectorySettingsManager.Settings.UseDebugLineDisplay))
+            {
+                NavalDLCTrajectorySupport.UpdatePlayerShipTrajectory();
+            }
+        }
+    }
+    public static class NavalDLCTrajectorySupport
+    {       
+        // -----------------------
+        // 可配置参数（按需微调）
+        // -----------------------
+        private const float LOOK_UP_THRESHOLD = 0.2f; // 
+        private const float DEFAULT_ALPHA = 1.0f;
+        private const float BLUR_ALPHA = 0.03f;          // 目标虚化 alpha（可调）
+        private const float ALPHA_EPSILON = 0.01f;      // 小于该值视为无变化
+        private const float SMOOTHING_FACTOR_PER_TICK = 0.15f; // 每帧平滑因子（没有 dt 情况下的经验值）
+        private static bool _initialized;
+        private static bool _navalAvailable;
+
+        private static Type _agentNavalComponentType;
+        private static PropertyInfo _steppedShipProperty;
+        private static PropertyInfo _shipSiegeWeaponProperty;
+
+        private static FieldInfo _agentComponentsField;
+
+        private static void Init()
+        {
+            if (_initialized)
+                return;
+
+            _initialized = true;
+
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                var type = asm.GetType("NavalDLC.Missions.AgentNavalComponent");
+                if (type != null)
+                {
+                    _agentNavalComponentType = type;
+
+                    var missionShipType =
+                        asm.GetType("NavalDLC.Missions.Objects.MissionShip");
+
+                    _steppedShipProperty =
+                        _agentNavalComponentType.GetProperty("SteppedShip",
+                            BindingFlags.Instance | BindingFlags.Public);
+
+                    _shipSiegeWeaponProperty =
+                        missionShipType?.GetProperty("ShipSiegeWeapon",
+                            BindingFlags.Instance | BindingFlags.Public);
+
+                    _agentComponentsField =
+                        typeof(Agent).GetField("_components",
+                            BindingFlags.Instance | BindingFlags.NonPublic);
+
+                    _navalAvailable =
+                        _steppedShipProperty != null &&
+                        _shipSiegeWeaponProperty != null &&
+                        _agentComponentsField != null;
+                    return;
+                }
+            }
+
+            _navalAvailable = false;
+        }
+        public static void UpdatePlayerShipTrajectory()
+        {
+            Init();
+
+            if (!_navalAvailable)
+                return;
+
+            Agent player = Agent.Main;
+            if (player == null || !player.IsActive())
+                return;
+
+            object navalComponent = GetNavalComponent(player);
+            if (navalComponent == null)
+                return;
+
+            object missionShip = _steppedShipProperty.GetValue(navalComponent);
+            if (missionShip == null)
+                return;
+
+            object siegeObj = _shipSiegeWeaponProperty.GetValue(missionShip);
+            if (siegeObj == null)
+                return;
+
+            if (siegeObj is RangedSiegeWeapon siegeWeapon)
+            {
+                if (siegeObj != null)
+                {
+                    bool siegeLookingUp = false;
+                    try
+                    {
+                        // 直接使用引擎提供的方向 
+                        Vec3 siegeDir = ProjectileTrajectorySystem.GetSiegeShootingDirection((RangedSiegeWeapon)siegeObj);
+                        siegeLookingUp = siegeDir.z > LOOK_UP_THRESHOLD;
+                    }
+                    catch
+                    {
+                        siegeLookingUp = false;
+                    }
+
+                    // 获取设置：是否启用抬头虚化功能
+                    bool enableLookUpBlur = ProjectileTrajectorySettingsManager.Settings.EnableLookUpBlur;
+
+                    // 海战dlc，攻城器抬高时，隐藏攻城器用来显示弹道
+                    if (enableLookUpBlur)
+                    {
+                        SkillSystemBehavior.SetSiegeTargetAlpha((RangedSiegeWeapon)siegeObj, siegeLookingUp ? BLUR_ALPHA : DEFAULT_ALPHA);
+                    }
+                }
+                ProjectileTrajectorySystem.UpdateTrajectory(player, siegeWeapon);
+            }
+        }
+
+        private static object GetNavalComponent(Agent agent)
+        {
+            var list = _agentComponentsField.GetValue(agent) as IEnumerable;
+            if (list == null)
+                return null;
+
+            foreach (var comp in list)
+            {
+                if (comp == null)
+                    continue;
+
+                if (comp.GetType() == _agentNavalComponentType)
+                    return comp;
+            }
+
+            return null;
+        }
+    }
+}
+========================================
+
+【ProjectileTrajectorySettings.cs】
+﻿// ProjectileTrajectorySettings.cs
+using MCM.Abstractions.Attributes;
+using MCM.Abstractions.Attributes.v2;
+using MCM.Abstractions.Base.Global;
+using TaleWorlds.Localization;
+
+namespace ProjectileTrajectorySystem
+{
+    public class ProjectileTrajectorySettings : AttributeGlobalSettings<ProjectileTrajectorySettings>
+    {
+        public override string Id => "ProjectileTrajectorySystem";
+
+        // 原文：弹道轨迹系统
+        public override string DisplayName => new TextObject("{=PTS_DisplayName}Projectile Trajectory System").ToString();
+        public override string FolderName => "ProjectileTrajectorySystem";
+        public override string FormatType => "xml";
+
+        // 原文：启用弹道系统
+        // 原文 Hint：总开关：是否启用弹道可视化和敌人高亮。
+        [SettingPropertyBool(
+            "{=PTS_001}Enable Trajectory System",
+            RequireRestart = false,
+            HintText = "{=PTS_H001}Master switch: enable trajectory visualization and enemy highlighting.",
+            Order = 0)]
+        public bool EnableTrajectory { get; set; } = true;
+
+        // 原文 Group：弹道显示设置
+        [SettingPropertyGroup("{=PTS_G001}Trajectory Display")]
+        // 原文：玩家弹道
+        // 原文 Hint：显示玩家远程武器的预测弹道。
+        [SettingPropertyBool(
+            "{=PTS_002}Player Trajectory",
+            RequireRestart = false,
+            HintText = "{=PTS_H002}Show predicted trajectory for player's ranged weapons.",
+            Order = 1)]
+        public bool PlayerTrajectory { get; set; } = true;
+
+        [SettingPropertyGroup("{=PTS_G001}Trajectory Display")]
+        // 原文：敌人弹道
+        // 原文 Hint：当敌人瞄准玩家时，显示其预测的射击线。
+        [SettingPropertyBool(
+            "{=PTS_003}Enemy Trajectory",
+            RequireRestart = false,
+            HintText = "{=PTS_H003}Show predicted firing line when enemies aim at the player.",
+            Order = 2)]
+        public bool EnemyTrajectory { get; set; } = true;
+
+        [SettingPropertyGroup("{=PTS_G001}Trajectory Display")]
+        // 原文：实时投射物轨迹
+        // 原文 Hint：显示已射出的箭矢、弩箭等投射物的实际飞行路径。
+        [SettingPropertyBool(
+            "{=PTS_004}In-flight Missile Trajectory",
+            RequireRestart = false,
+            HintText = "{=PTS_H004}Show actual flight path of fired arrows, bolts, and other projectiles.",
+            Order = 3)]
+        public bool MissileTrajectory { get; set; } = true;
+
+        // ===== 移动目标预瞄 (Lead Prediction) =====
+        [SettingPropertyGroup("{=PTS_G001}Trajectory Display")]
+        [SettingPropertyBool(
+            "{=PTS_015}Enable Lead Prediction",
+            RequireRestart = false,
+            HintText = "{=PTS_H015}Enable trajectory prediction for moving targets (lead targeting). EXPERIMENTAL FEATURE: Not recommended for general use.",
+            Order = 12)]
+        public bool EnableLeadPrediction { get; set; } = true;
+
+        // 原文 Group：视觉效果
+        [SettingPropertyGroup("{=PTS_G002}Visual Effects")]
+        // 原文：敌人高亮
+        // 原文 Hint：对正在瞄准玩家的敌方远程单位进行红色轮廓高亮。
+        [SettingPropertyBool(
+            "{=PTS_005}Enemy Highlight",
+            RequireRestart = false,
+            HintText = "{=PTS_H005}Highlight enemy ranged units aiming at the player with red outline.",
+            Order = 4)]
+        public bool EnemyHighlight { get; set; } = true;
+
+        // 原文 Group：渲染方式
+        [SettingPropertyGroup("{=PTS_G003}Rendering Method")]
+        // 原文：使用实体图标显示 (GameEntity)
+        // 原文 Hint：使用游戏物体图标（视觉效果差，游戏画面设置中开启DLSS时现实正常）。
+        [SettingPropertyBool(
+            "{=PTS_006}Use GameEntity Icons",
+            RequireRestart = false,
+            HintText = "{=PTS_H006}Use game object icons (poor visuals, but displays correctly when DLSS is enabled in video settings).",
+            Order = 5)]
+        public bool UseGameEntityDisplay { get; set; } = false;
+
+        [SettingPropertyGroup("{=PTS_G003}Rendering Method")]
+        // 原文：使用调试线段显示 (DebugLine)
+        // 原文 Hint：使用简单的线段渲染（性能极高，但游戏画面设置中开启DLSS会导致显示异常）。
+        [SettingPropertyBool(
+            "{=PTS_007}Use DebugLine",
+            RequireRestart = false,
+            HintText = "{=PTS_H007}Use simple line rendering (extremely high performance, but enabling DLSS in video settings will cause display anomalies).",
+            Order = 6)]
+        public bool UseDebugLineDisplay { get; set; } = true;
+
+        [SettingPropertyGroup("{=PTS_G003}Rendering Method")]
+        // 原文：GE 显示 - 玩家远程
+        // 原文 Hint：是否为玩家的普通远程武器启用实体图标显示。
+        [SettingPropertyBool(
+            "{=PTS_008}GE Display - Player Ranged",
+            RequireRestart = false,
+            HintText = "{=PTS_H008}Enable GameEntity icons for player's handheld ranged weapons.",
+            Order = 7)]
+        public bool UseGameEntityForPlayerRanged { get; set; } = true;
+
+        [SettingPropertyGroup("{=PTS_G003}Rendering Method")]
+        // 原文：GE 显示 - 玩家攻城武器
+        // 原文 Hint：是否为玩家操作的攻城器械启用实体图标显示。
+        [SettingPropertyBool(
+            "{=PTS_009}GE Display - Player Siege",
+            RequireRestart = false,
+            HintText = "{=PTS_H009}Enable GameEntity icons for player-controlled siege engines.",
+            Order = 8)]
+        public bool UseGameEntityForPlayerSiege { get; set; } = true;
+
+        // 原文 Group：性能设置
+        [SettingPropertyGroup("{=PTS_G004}Performance")]
+        // 原文：最大追踪敌人数量
+        // 原文 Hint：同时计算并显示预测弹道的最大敌人数量。
+        [SettingPropertyInteger(
+            "{=PTS_010}Max Tracked Enemies",
+            0, 50,
+            "{=PTS_H010}Maximum number of enemies to calculate and display trajectories for simultaneously.",
+            Order = 9)]
+        public int MaxTrackedEnemiesLegacy { get; set; } = 10;
+
+        [SettingPropertyGroup("{=PTS_G002}Visual Effects")]
+        // 原文：启用抬头虚化
+        // 原文 Hint：高角度仰射时虚化玩家模型，防止遮挡视野。
+        [SettingPropertyBool(
+            "{=PTS_011}Enable Look-up Blur",
+            RequireRestart = false,
+            HintText = "{=PTS_H011}Blur player model when aiming at high angles to avoid obstructing view.",
+            Order = 10)]
+        public bool EnableLookUpBlur { get; set; } = true;
+
+        [SettingPropertyGroup("{=PTS_G002}Visual Effects")]
+        // 原文：仅在准备攻击时显示
+        // 原文 Hint：只在拉弓或瞄准阶段显示弹道，平时隐藏。
+        [SettingPropertyBool(
+            "{=PTS_012}Show Only When Ready",
+            RequireRestart = false,
+            HintText = "{=PTS_H012}Only show trajectory during draw or aim phase, hidden otherwise.",
+            Order = 11)]
+        public bool EnableAttackReadyRestriction { get; set; } = true;
+        // ===== 近敌慢动作 =====
+        [SettingPropertyGroup("{=PTS_G005}Slow Motion")]
+        [SettingPropertyBool(
+            "{=PTS_100}Enable Slow Motion",
+            RequireRestart = false,
+            HintText = "{=PTS_H100}Slow down time when aiming with enemies nearby.",
+            Order = 20)]
+        public bool EnableSlowMotion { get; set; } = false;
+
+        [SettingPropertyGroup("{=PTS_G005}Slow Motion")]
+        [SettingPropertyInteger(
+            "{=PTS_101}Enemy Radius",
+            1, 50,
+            "{=PTS_H101}Radius to detect nearby enemies.",
+            Order = 21)]
+        public int SlowMoEnemyRadius { get; set; } = 10;
+
+        [SettingPropertyGroup("{=PTS_G005}Slow Motion")]
+        [SettingPropertyFloatingInteger(
+            "{=PTS_102}Time Scale",
+            0.05f, 1f,
+            "{=PTS_H102}Slow motion multiplier.",
+            Order = 22)]
+        public float SlowMoTimeScale { get; set; } = 0.35f;
+        // 当 MCM GUI 中某项被修改时，MCM 会调用该覆盖方法
+        public override void OnPropertyChanged(string propertyName)
+        {
+            base.OnPropertyChanged(propertyName);
+
+            // 同步到 XML 后端并保存（使非 MCM 玩家也能使用修改）
+            ProjectileTrajectorySettingsManager.SyncFromMCM(this);
+        }
+
+        // 可选：构造时从 XML 初始化 MCM UI 显示值（防止 UI 默认值与 XML 不一致）
+        public ProjectileTrajectorySettings()
+        {
+            var data = ProjectileTrajectorySettingsManager.Settings;
+            if (data != null)
+            {
+                EnableTrajectory = data.EnableTrajectory;
+                PlayerTrajectory = data.PlayerTrajectory;
+                EnemyTrajectory = data.EnemyTrajectory;
+                MissileTrajectory = data.MissileTrajectory;
+                EnemyHighlight = data.EnemyHighlight;
+                UseGameEntityDisplay = data.UseGameEntityDisplay;
+                UseDebugLineDisplay = data.UseDebugLineDisplay;
+                UseGameEntityForPlayerRanged = data.UseGameEntityForPlayerRanged;
+                UseGameEntityForPlayerSiege = data.UseGameEntityForPlayerSiege;
+                MaxTrackedEnemiesLegacy = data.MaxTrackedEnemiesLegacy;
+                EnableLookUpBlur = data.EnableLookUpBlur;
+                EnableAttackReadyRestriction = data.EnableAttackReadyRestriction;
+            }
+        }
+    }
+}
+========================================
+
+【ProjectileTrajectorySettingsData.cs】
+﻿// ProjectileTrajectorySettingsData.cs
+using System;
+using System.Xml.Serialization;
+
+namespace ProjectileTrajectorySystem
+{
+    [Serializable]
+    [XmlRoot("ProjectileTrajectorySettings")]
+    public class ProjectileTrajectorySettingsData
+    {
+        // 总开关
+        public bool EnableTrajectory = true;
+
+        // 弹道显示
+        public bool PlayerTrajectory = true;
+        public bool EnemyTrajectory = true;
+        public bool MissileTrajectory = true;
+
+        // 视觉增强
+        public bool EnemyHighlight = true;
+
+        // 显示方式
+        public bool UseGameEntityDisplay = false;
+        public bool UseDebugLineDisplay = true;
+
+        public bool UseGameEntityForPlayerRanged = true;
+        public bool UseGameEntityForPlayerSiege = true;
+
+        // 敌人弹道
+        public int MaxTrackedEnemiesLegacy = 10;
+
+        // ===== 新增：抬头虚化和攻击准备阶段限制设置 =====
+        public bool EnableLookUpBlur = true;
+        public bool EnableAttackReadyRestriction = true;
+
+        // ===== Slow Motion =====
+        public bool EnableSlowMotion = false;
+        public int SlowMoEnemyRadius = 10;
+        public float SlowMoTimeScale = 0.35f;
+        // ===== Lead Prediction =====
+        public bool EnableLeadPrediction = true;
+    }
+}
+========================================
+
+【ProjectileTrajectorySettingsManager.cs】
+﻿// ProjectileTrajectorySettingsManager.cs
+using System;
+using System.IO;
+using System.Threading;
+using System.Xml.Serialization;
+using TaleWorlds.Library;
+
+namespace ProjectileTrajectorySystem
+{
+    public static class ProjectileTrajectorySettingsManager
+    {
+        private static readonly string ConfigFolder =
+            Path.Combine(BasePath.Name, "Modules", "ProjectileTrajectorySystem");
+
+        private static readonly string XmlPath =
+            Path.Combine(ConfigFolder, "ProjectileTrajectorySettings.xml");
+
+        private static readonly object _lock = new object();
+        private static FileSystemWatcher _watcher;
+        private static bool _reloadRequested;
+        private static DateTime _lastReloadTime = DateTime.MinValue;
+
+        public static ProjectileTrajectorySettingsData Data { get; private set; }
+
+        public static ProjectileTrajectorySettingsData Settings
+        {
+            get
+            {
+                if (Data == null)
+                    Load();
+                return Data;
+            }
+        }
+
+        public static void Load()
+        {
+            lock (_lock)
+            {
+                if (!Directory.Exists(ConfigFolder))
+                    Directory.CreateDirectory(ConfigFolder);
+
+                if (File.Exists(XmlPath))
+                {
+                    LoadFromXml();
+                }
+                else
+                {
+                    Data = new ProjectileTrajectorySettingsData();
+                    SaveToXml();
+                }
+
+                StartWatcher();
+            }
+        }
+
+        public static void Save()
+        {
+            lock (_lock)
+            {
+                SaveToXml();
+            }
+        }
+
+        private static void LoadFromXml()
+        {
+            try
+            {
+                var serializer = new XmlSerializer(typeof(ProjectileTrajectorySettingsData));
+                using var stream = new FileStream(XmlPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                Data = (ProjectileTrajectorySettingsData)serializer.Deserialize(stream)
+                       ?? new ProjectileTrajectorySettingsData();
+            }
+            catch
+            {
+                Data = new ProjectileTrajectorySettingsData();
+            }
+        }
+
+        private static void SaveToXml()
+        {
+            try
+            {
+                var serializer = new XmlSerializer(typeof(ProjectileTrajectorySettingsData));
+                using var stream = new FileStream(XmlPath, FileMode.Create, FileAccess.Write, FileShare.Read);
+                serializer.Serialize(stream, Data ?? new ProjectileTrajectorySettingsData());
+            }
+            catch { }
+        }
+
+        private static void StartWatcher()
+        {
+            if (_watcher != null)
+                return;
+
+            _watcher = new FileSystemWatcher(ConfigFolder, "ProjectileTrajectorySettings.xml");
+            _watcher.NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size;
+            _watcher.Changed += OnXmlChanged;
+            _watcher.EnableRaisingEvents = true;
+        }
+
+        private static void OnXmlChanged(object sender, FileSystemEventArgs e)
+        {
+            // 防止连续触发
+            var now = DateTime.Now;
+            if ((now - _lastReloadTime).TotalMilliseconds < 300)
+                return;
+
+            _lastReloadTime = now;
+            _reloadRequested = true;
+        }
+
+        /// <summary>
+        /// 在主线程（如 Mission Tick）中调用
+        /// </summary>
+        public static void ProcessPendingReload()
+        {
+            if (!_reloadRequested)
+                return;
+
+            lock (_lock)
+            {
+                _reloadRequested = false;
+                LoadFromXml();
+
+                InformationManager.DisplayMessage(
+                    new InformationMessage("ProjectileTrajectorySystem: XML 热重载完成"));
+            }
+        }
+
+        public static void SyncFromMCM(ProjectileTrajectorySettings mcm)
+        {
+            if (mcm == null) return;
+            lock (_lock)
+            {
+                if (Data == null) Data = new ProjectileTrajectorySettingsData();
+
+                Data.EnableTrajectory = mcm.EnableTrajectory;
+                Data.PlayerTrajectory = mcm.PlayerTrajectory;
+                Data.EnemyTrajectory = mcm.EnemyTrajectory;
+                Data.MissileTrajectory = mcm.MissileTrajectory;
+                Data.EnemyHighlight = mcm.EnemyHighlight;
+                Data.UseGameEntityDisplay = mcm.UseGameEntityDisplay;
+                Data.UseDebugLineDisplay = mcm.UseDebugLineDisplay;
+                Data.UseGameEntityForPlayerRanged = mcm.UseGameEntityForPlayerRanged;
+                Data.UseGameEntityForPlayerSiege = mcm.UseGameEntityForPlayerSiege;
+                Data.MaxTrackedEnemiesLegacy = mcm.MaxTrackedEnemiesLegacy;
+                Data.EnableSlowMotion = mcm.EnableSlowMotion;
+                Data.SlowMoEnemyRadius = mcm.SlowMoEnemyRadius;
+                Data.SlowMoTimeScale = mcm.SlowMoTimeScale;
+                Data.EnableLeadPrediction = mcm.EnableLeadPrediction;
+
+                SaveToXml();
+            }
+        }
+    }
+}
+========================================
+
+【ProjectileTrajectorySystem.cs】
+﻿// 统一的投射物弹道计算与可视化系统
+// 支持：
+// - 玩家远程武器
+// - 攻城远程武器
+// - 敌方 AI 预测弹道 (旧版)
+// - 新版：基于 OnAgentShootMissile 的一次性弹道计算与显示
+// - GameEntity 和 DebugLine 两种显示方式，可单独或同时启用
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using TaleWorlds.Core;
+using TaleWorlds.Engine;
+using TaleWorlds.Library;
+using TaleWorlds.MountAndBlade;
+using static TaleWorlds.Library.MathF;
+
+namespace ProjectileTrajectorySystem
+{
+    public static class ProjectileTrajectorySystem
+    {
+        #region ===== 内部状态 =====
+
+        private static bool _hasCollided;
+        private static Vec3 _collisionPoint = Vec3.Invalid;
+        private static bool _isFirstPoint;
+        private static Vec3 _lastPoint;
+        private static float _airFriction;
+
+        #endregion
+
+        #region ===== 玩家 / 攻城武器弹道 =====
+
+        public static void UpdateTrajectory(Agent agent, RangedSiegeWeapon siegeWeapon = null)
+        {
+            if (agent == null || !agent.IsActive()) return;
+
+            if (siegeWeapon == null)
+            {
+                // 没有攻城武器，不执行任何操作，保留之前的轨迹（例如玩家远程武器轨迹）
+                return;
+            }
+
+            // --- 修改：检查细分设置 ---
+            bool shouldShowPlayerSiegeGE = ProjectileTrajectorySettingsManager.Settings.UseGameEntityDisplay &&
+                                           ProjectileTrajectorySettingsManager.Settings.UseGameEntityForPlayerSiege;
+            bool shouldShowPlayerSiegeDL = ProjectileTrajectorySettingsManager.Settings.UseDebugLineDisplay;
+
+            // 如果 GameEntity 和 DebugLine 都不显示攻城轨迹，则直接返回
+            if (!shouldShowPlayerSiegeGE && !shouldShowPlayerSiegeDL)
+            {
+                return;
+            }
+
+            // 如果需要显示 GameEntity，才清理旧轨迹
+            if (shouldShowPlayerSiegeGE)
+            {
+                ClearNormalTrajectory(); // 清理旧轨迹，为新轨迹腾出空间
+            }
+
+            ResetFrameState();
+
+            float speed = GetSiegeShootingSpeed(siegeWeapon);
+            Vec3 direction = GetSiegeShootingDirection(siegeWeapon);
+            Vec3 startPos = GetSiegeProjectileStartPosition(siegeWeapon);
+
+            // 调用 SimulateTrajectory，它会根据 ProjectileTrajectorySettingsManager.Settings 的全局设置进行绘制
+            SimulateTrajectory(
+                startPos,
+                direction,
+                speed,
+                0.3f,
+                4.8f,
+                0.15f,
+                timeKeyOffset: 0f
+            // customLine 默认为 null，意味着使用 WoW_Line
+            // color 默认为 0xFF00FFFFu
+            ); 
+
+        }
+
+        public static void UpdateTrajectoryRangeWeapon(Agent agent)
+        {
+            if (agent == null || !agent.IsActive()) return;
+
+            bool shouldShowPlayerRangedGE = false;
+            EquipmentIndex weaponIndex = agent.GetPrimaryWieldedItemIndex();
+            if (weaponIndex == EquipmentIndex.None)
+            {
+                shouldShowPlayerRangedGE = ProjectileTrajectorySettingsManager.Settings.UseGameEntityDisplay &&
+                                           ProjectileTrajectorySettingsManager.Settings.UseGameEntityForPlayerRanged;
+                if (shouldShowPlayerRangedGE && SkillSystemBehavior.WoW_Line.Count > 0)
+                {
+                    ClearNormalTrajectory();
+                }
+                return;
+            }
+
+            MissionWeapon weapon = agent.Equipment[weaponIndex];
+            if (weapon.IsEmpty || !weapon.CurrentUsageItem.IsRangedWeapon)
+            {
+                shouldShowPlayerRangedGE = ProjectileTrajectorySettingsManager.Settings.UseGameEntityDisplay &&
+                                           ProjectileTrajectorySettingsManager.Settings.UseGameEntityForPlayerRanged;
+                if (shouldShowPlayerRangedGE && SkillSystemBehavior.WoW_Line.Count > 0)
+                {
+                    ClearNormalTrajectory();
+                }
+                return;
+            }
+
+            shouldShowPlayerRangedGE = ProjectileTrajectorySettingsManager.Settings.UseGameEntityDisplay &&
+                                       ProjectileTrajectorySettingsManager.Settings.UseGameEntityForPlayerRanged;
+            bool shouldShowPlayerRangedDL = ProjectileTrajectorySettingsManager.Settings.UseDebugLineDisplay;
+
+            if (!shouldShowPlayerRangedGE && !shouldShowPlayerRangedDL)
+            {
+                return;
+            }
+
+            if (shouldShowPlayerRangedGE)
+            {
+                ClearNormalTrajectory();
+            }
+
+            ResetFrameState();
+
+            // === 新增：优先使用缓存速度 ===
+            float speed;
+            var ammoItem = weapon.AmmoWeapon;
+            string weaponId = weapon.Item?.Name?.ToString() ?? string.Empty;
+            string ammoId = ammoItem.Item?.Name?.ToString() ?? string.Empty;
+            if (ammoId == null || ammoId.Equals(""))
+            {
+                ammoId = weaponId;
+            }
+            var key = (agent.Index, weaponId, ammoId);
+
+            if (SkillSystemBehavior.ProjectileSpeedCache.Count>0 &&
+                SkillSystemBehavior.ProjectileSpeedCache.TryGetValue(key, out float cachedSpeed) == true)
+            {
+                speed = cachedSpeed;
+            }
+            else
+            {
+                speed = GetAgentMissileSpeed(agent, weapon);
+            }
+
+            _airFriction = GetWeaponAirFriction(agent, out _);
+
+            //Vec3 matrixFrame = agent.AgentVisuals.GetBoneEntitialFrame((sbyte)TaleWorlds.Core.HumanBone.HandR, true).origin;
+            //Vec3 getGlobalFrame = agent.AgentVisuals.GetGlobalFrame().origin;
+            //InformationManager.DisplayMessage(new InformationMessage(agent.GetCurrentAction(1).GetName()));
+            ////Vec3 matrixFrame2 =agent.AgentVisuals.GetBoneEntitialFrameAtAnimationProgress((sbyte)TaleWorlds.Core.HumanBone.HandR,1,).origin;
+
+            //SimulateTrajectory(
+            //    matrixFrame + getGlobalFrame,
+            //    agent.LookDirection,
+            //    speed,
+            //    0f,
+            //    3.0f,
+            //    0.05f,
+            //    timeKeyOffset: 0f
+            //);
+
+            SimulateTrajectory(
+                agent.GetEyeGlobalPosition(),
+                agent.LookDirection,
+                speed,
+                0f,
+                3.0f,
+                0.15f,
+                timeKeyOffset: 0f
+            );
+            SkillSystemBehavior.debugString1 = 
+                agent.GetEyeGlobalPosition().X.ToString() + " " + 
+                agent.GetEyeGlobalPosition().Y.ToString() + " " + 
+                agent.GetEyeGlobalPosition().Z .ToString() + " " +
+                speed.ToString();
+        }
+
+        #endregion
+
+        #region ===== 敌人预测弹道 (旧版) =====
+
+        public static void UpdateEnemyTrajectory(Agent enemy)
+        {
+            if (enemy == null || !enemy.IsActive()) return;
+
+            EquipmentIndex weaponIndex = enemy.GetPrimaryWieldedItemIndex();
+            if (weaponIndex == EquipmentIndex.None) return;
+
+            MissionWeapon weapon = enemy.Equipment[weaponIndex];
+            if (weapon.IsEmpty || !weapon.CurrentUsageItem.IsRangedWeapon) return;
+
+            var line = GetOrCreateEnemyLine(enemy.Index);
+
+            ResetFrameState();
+
+            float speed = weapon.GetModifiedMissileSpeedForCurrentUsage() * enemy.AgentDrivenProperties.MissileSpeedMultiplier;
+            _airFriction = GetWeaponAirFriction(enemy, out _);
+
+            SimulateTrajectory(
+                enemy.GetEyeGlobalPosition(),
+                enemy.LookDirection,
+                speed,
+                0.3f,
+                3.0f,
+                0.2f,
+                timeKeyOffset: 0f,
+                customLine: line,
+                baseColor: 0xFFFF4444u // 红色
+            );
+        }
+
+        public static void ClearEnemyTrajectory(int agentIndex)
+        {
+            if (!SkillSystemBehavior.EnemyTrajectoryLines.TryGetValue(agentIndex, out var line)) return;
+
+            // 清理 GameEntity 轨迹点
+            foreach (var e in line.Values)
+            {
+                // 归还 GameEntity 到池中
+                SkillSystemBehavior.ReturnGameEntityToPool(e);
+            }
+            line.Clear(); // 清空字典，但保留字典本身
+
+            SkillSystemBehavior.EnemyTrajectoryLines.Remove(agentIndex);
+        }
+
+        #endregion
+
+        #region ===== 核心模拟 =====
+
+        private static void SimulateTrajectory(
+    Vec3 startPos,
+    Vec3 direction,
+    float speed,
+    float timeStart,
+    float timeEnd,
+    float timeStep,
+    float timeKeyOffset,
+    Dictionary<float, GameEntity> customLine = null,
+    uint baseColor = 0xFF00FFFFu)
+        {
+            // 检查是否至少有一种显示方式开启
+            if (!ProjectileTrajectorySettingsManager.Settings.UseGameEntityDisplay && !ProjectileTrajectorySettingsManager.Settings.UseDebugLineDisplay)
+            {
+                // 如果两种显示方式都关闭，则直接返回，不进行任何计算或绘制
+                return;
+            }
+
+            direction.Normalize();
+            Vec3 previousPos = startPos; // 初始化上一个点为起点
+
+            // 预设颜色数组，用于清晰区分不同距离的线段
+            uint[] colorArray = {
+        0xFF00FFFFu, // 青色 - 起始
+        0xFF0000FFu, // 红色
+        0xFF00FF00u, // 绿色
+        0xFFFF0000u, // 蓝色
+        0xFF8000FFu, // 紫色
+        0xFFFFFF00u, // 黄色
+        0xFFFF00FFu, // 品红
+        0xFF00FFFFu, // 青色
+        0xFFFFA500u, // 橙色
+        0xFF808080u, // 灰色
+        0xFF000080u, // 深蓝
+        0xFF008000u, // 深绿
+        0xFF800000u, // 深红
+        0xFF800080u, // 深紫
+        0xFF008080u, // 深青
+        0xFF808000u  // 深黄
+    };
+
+            int colorIndex = 0;
+
+            for (float t = timeStart; t <= timeEnd; t += timeStep)
+            {
+                if (_hasCollided) break;
+
+                Vec3 currentPos = CalculatePosition(startPos, direction, speed, t);
+
+                // 根据设置选择显示方式
+                if (ProjectileTrajectorySettingsManager.Settings.UseGameEntityDisplay)
+                {
+                    // 使用 GameEntity 显示 - 传递原始的 customLine
+                    // 如果 customLine 是 null，PlaceGameEntityMarker 会使用 WoW_Line
+                    PlaceGameEntityMarker(currentPos, t + timeKeyOffset, customLine, baseColor);
+                }
+
+                if (ProjectileTrajectorySettingsManager.Settings.UseDebugLineDisplay)
+                {
+                    // 使用预设颜色数组中的颜色，循环使用
+                    uint segmentColor = colorArray[colorIndex % colorArray.Length];
+
+                    // 使用 DebugLine 显示线段，每个线段有明显的不同颜色
+                    DrawDebugLineSegment(previousPos, currentPos - previousPos, segmentColor, 0f);
+
+                    // 更新颜色索引
+                    colorIndex++;
+                }
+
+                previousPos = currentPos; // 更新上一个点
+            }
+        }
+        // --- 新增：用于在 OnMissionTick 中持续绘制 DebugLine ---
+        public static void DrawDebugLineTrajectory(List<Vec3> points, uint color)
+        {
+            if (points == null || points.Count < 2) return; // Need at least 2 points to draw a line
+
+            for (int i = 1; i < points.Count; i++)
+            {
+                Vec3 previousPos = points[i - 1];
+                Vec3 currentPos = points[i];
+                Vec3 direction = currentPos - previousPos;
+                RenderDebugLine(previousPos, direction, color, true, 0f); // Time 0 means it's drawn this frame only
+            }
+        }
+
+        private static Vec3 CalculatePosition(Vec3 origin, Vec3 direction, float speed, float time, float airFrictionOverride = -1f)
+        {
+            const float dt = 0.01f;
+            Vec3 velocity = direction * speed;
+            Vec3 position = origin;
+
+            float frictionToUse = airFrictionOverride >= 0 ? airFrictionOverride : _airFriction;
+
+            for (float t = 0; t < time; t += dt)
+            {
+                float v = velocity.Length;
+                if (v > 0.001f)
+                    velocity -= velocity.NormalizedCopy() * (frictionToUse * v * v * dt);
+                velocity.z -= 9.81f * dt;
+                position += velocity * dt;
+            }
+
+            return position;
+        }
+
+        #endregion
+
+        #region ===== 可视化 / 碰撞 (旧版) =====
+
+        // HandleCollision 保持不变，但只应用于 WoW_Line 的 GameEntity 清理
+        private static void HandleCollision(Vec3 pos, float timeKey)
+        {
+            if (_hasCollided) return;
+
+            if (Mission.Current.Scene.RayCastForClosestEntityOrTerrain(
+                    pos,
+                    pos + Vec3.Up * 5000f,
+                    out float dist,
+                    out Vec3 hitPoint,
+                    out _,
+                    1f) && dist < 5f)
+            {
+                _hasCollided = true;
+                _collisionPoint = hitPoint;
+                // GenerateImpactCircle 也应只应用于 WoW_Line
+                if (ProjectileTrajectorySettingsManager.Settings.UseGameEntityDisplay)
+                {
+                    GenerateImpactCircle(hitPoint);
+                }
+                // ClearTrajectoryAfterCollision 也只应用于 WoW_Line
+                if (ProjectileTrajectorySettingsManager.Settings.UseGameEntityDisplay)
+                {
+                    ClearTrajectoryAfterCollision(timeKey);
+                }
+            }
+        }
+
+        #endregion
+
+        #region ===== GameEntity 管理 (解耦后) =====
+
+        private static void PlaceGameEntityMarker(
+            Vec3 pos,
+            float timeKey,
+            Dictionary<float, GameEntity> line,
+            uint color)
+        {
+            line ??= SkillSystemBehavior.WoW_Line;
+
+            if (!line.TryGetValue(timeKey, out var entity))
+            {
+                // 从池中获取或创建新实体
+                entity = SkillSystemBehavior.GetOrCreateGameEntity();
+                // *不* 立即设置颜色，因为新获取的实体颜色缓存已被清除
+                // entity.SetContourColor(color, true); // 移除这行
+
+                // 注意：模型实例化可能需要优化，如果每次都执行可能仍有性能开销。
+                // 但目前保持与原逻辑一致，如果模型固定，可以考虑预设或缓存。
+                entity.AddAllMeshesOfGameEntity(
+                    GameEntity.Instantiate(
+                        Mission.Current.Scene,
+                        "mangonel_mapicon_projectile",
+                        true));
+                line[timeKey] = entity;
+            }
+
+            entity.SetLocalPosition(pos);
+
+            // --- 新增：性能优化 + 遮挡检测：检查颜色缓存并决定是否设置描边 ---
+            // 1. 获取玩家位置
+            Agent player = Agent.Main;
+            if (player == null || !player.IsActive())
+            {
+                // 如果玩家不存在或无效，暂时不清除颜色缓存，但不设置描边
+                // 可以选择在这里清除描边，但通常这种情况很少见
+                return;
+            }
+
+            Vec3 playerEyePos = player.GetEyeGlobalPosition();
+
+            // 2. 执行遮挡检测
+            float distanceToEntity = (pos - playerEyePos).Length;
+            bool isOccluded = Mission.Current.Scene.RayCastForClosestEntityOrTerrain(
+                playerEyePos,
+                pos,
+                out float hitDistance,
+                out Vec3 hitPoint,
+                out _,
+                0.1f);
+
+            bool isVisible = !(isOccluded && hitDistance < distanceToEntity);
+
+            // 3. 根据可见性决定描边颜色
+            uint effectiveColor = isVisible ? color : 0x00000000u; // 如果不可见，使用透明色 (0) 或 null，这里用 0x00000000u 便于缓存比较
+
+            // 4. 检查缓存并设置描边（性能优化）
+            if (!SkillSystemBehavior.GameEntityColorCache.TryGetValue(entity, out var cachedColor) || cachedColor != effectiveColor)
+            {
+                // 缓存中没有记录，或者颜色不同，则更新颜色并缓存
+                // 如果 effectiveColor 是透明色 (0x00000000u)，SetContourColor(null, true) 会移除描边
+                entity.SetContourColor(isVisible ? color : null, true);
+                SkillSystemBehavior.GameEntityColorCache[entity] = effectiveColor;
+            }
+            // 如果颜色相同（无论是可见的 color 还是不可见的 0x00000000u），则跳过 SetContourColor 调用
+            // --- 结束新增 ---
+        }
+        private static void ClearTrajectoryAfterCollision(float collisionKey)
+        {
+            foreach (var kv in SkillSystemBehavior.WoW_Line.ToList())
+            {
+                if (kv.Key > collisionKey && kv.Key < 100f)
+                {
+                    // 归还 GameEntity 到池中
+                    SkillSystemBehavior.ReturnGameEntityToPool(kv.Value);
+                    SkillSystemBehavior.WoW_Line.Remove(kv.Key); // 从字典中移除
+                }
+            }
+        }
+
+        private static void GenerateImpactCircle(Vec3 center)
+        {
+            const int count = 8;
+            const float radius = 2f;
+
+            for (int i = 0; i < count; i++)
+            {
+                float key = 100 + i;
+                float angle = TaleWorlds.Library.MathF.PI * 2f * i / count;
+                Vec3 pos = new Vec3(
+                    center.x + TaleWorlds.Library.MathF.Cos(angle) * radius,
+                    center.y + TaleWorlds.Library.MathF.Sin(angle) * radius,
+                    center.z);
+
+                PlaceGameEntityMarker(pos, key, SkillSystemBehavior.WoW_Line, 0xFF00FFFFu);
+            }
+        }
+
+        public static void ClearNormalTrajectory()
+        {
+            foreach (var e in SkillSystemBehavior.WoW_Line.Values)
+            {
+                // 归还 GameEntity 到池中
+                SkillSystemBehavior.ReturnGameEntityToPool(e);
+            }
+            SkillSystemBehavior.WoW_Line.Clear(); // 清空字典
+        }
+
+        #endregion
+
+        #region ===== DebugLine 管理 (解耦后) =====
+
+        private static void DrawDebugLineSegment(Vec3 position, Vec3 direction, uint color, float time)
+        {
+            RenderDebugLine(position, direction, color, true, time);
+        }
+
+        #endregion
+
+        #region ===== 工具方法 =====
+
+        private static void ResetFrameState()
+        {
+            _hasCollided = false;
+            _collisionPoint = Vec3.Invalid;
+            _isFirstPoint = false;
+            _lastPoint = Vec3.Zero;
+        }
+
+        private static Dictionary<float, GameEntity> GetOrCreateEnemyLine(int id)
+        {
+            if (!SkillSystemBehavior.EnemyTrajectoryLines.TryGetValue(id, out var line))
+            {
+                line = new Dictionary<float, GameEntity>();
+                SkillSystemBehavior.EnemyTrajectoryLines[id] = line;
+            }
+
+            return line;
+        }
+
+        private static float GetAgentMissileSpeed(Agent agent, MissionWeapon weapon)
+        {
+            return weapon.GetModifiedMissileSpeedForCurrentUsage() * agent.AgentDrivenProperties.MissileSpeedMultiplier;
+        }
+
+        #endregion
+
+        #region ===== 原生反射接口（保持） =====
+
+        public static float GetSiegeShootingSpeed(RangedSiegeWeapon weapon)
+        {
+            return (float)weapon.GetType()
+                .GetProperty("ShootingSpeed", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?.GetValue(weapon);
+        }
+
+        public static Vec3 GetSiegeShootingDirection(RangedSiegeWeapon weapon)
+        {
+            return (Vec3)weapon.GetType()
+                .GetProperty("ShootingDirection", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?.GetValue(weapon);
+        }
+
+        public static Vec3 GetSiegeProjectileStartPosition(RangedSiegeWeapon weapon)
+        {
+            if (weapon == null) return Vec3.Invalid;
+
+            // 检查是否是 Ballista 类型（包括 ShipBallista 等派生类）
+            if (weapon is Ballista ballistaInstance)
+            {
+                // 对于 Ballista，直接使用 ProjectileEntityCurrentGlobalPosition
+                // 这是引擎内部在发射时设置的精确发射点位置
+                return ballistaInstance.ProjectileEntityCurrentGlobalPosition;
+            }
+            // 如果不是 Ballista 类型，则沿用原有的逻辑
+            // 这适用于 Mangonel, Trebuchet 等使用 "clean"/"projectile_leaving_position" 的武器
+            else
+            {
+                WeakGameEntity weaponEntity = weapon.GameEntity;
+                if (weaponEntity == null) return Vec3.Invalid;
+
+                // 1️⃣ 找到 "clean" 子节点
+                WeakGameEntity clean = WeakGameEntity.Invalid;
+                var children = weaponEntity.GetChildren();
+                if (children != null)
+                {
+                    clean = children.FirstOrDefault(x => x != null && x.Name == "clean");
+                }
+
+                if (clean == null) return Vec3.Invalid;
+
+                // 2️⃣ 从 WeakGameEntity 转换成 GameEntity
+                GameEntity launcher = GameEntity.CreateFromWeakEntity(clean);
+                if (launcher == null) return Vec3.Invalid;
+
+                // 3️⃣ 查找 projectile_leaving_position 节点
+                var launcherChildren = launcher.GetChildren();
+                if (launcherChildren == null) return Vec3.Invalid;
+
+                var projectileNode = launcherChildren.FirstOrDefault(x => x != null && (x.Name == "projectile_leaving_position" || x.Name == "use_pos"));
+                if (projectileNode == null) return Vec3.Invalid;
+
+                // 4️⃣ 返回坐标
+                Vec3 position = projectileNode.GlobalPosition;
+                return position;
+            }
+        }
+        public static float GetWeaponAirFriction(Agent agent, out EquipmentIndex _)
+        {
+            _ = EquipmentIndex.None;
+
+            // 检查是否是人类角色
+            if (!agent.IsHuman) return 0f;
+
+            // 获取当前武器
+            var weapon = agent.WieldedWeapon;
+            if (weapon.IsEmpty) return 0f;
+
+            // 获取武器的ItemObject
+            var item = weapon.Item;
+            if (item == null || item.WeaponComponent == null)
+            {
+                return 0f;
+            }
+
+            // 获取PrimaryWeapon的WeaponClass和WeaponFlags
+            var primaryWeapon = item.WeaponComponent.PrimaryWeapon;
+            if (primaryWeapon == null)
+            {
+                return 0f;
+            }
+
+            // 使用引擎提供的标准方法获取空气阻力
+            float outAirFrictionConstant = ItemObject.GetAirFrictionConstant(primaryWeapon.WeaponClass, primaryWeapon.WeaponFlags);
+            //InformationManager.DisplayMessage(new InformationMessage(outAirFrictionConstant.ToString()));
+            return outAirFrictionConstant;
+        }
+
+        #endregion
+
+        #region ===== Debug Line =====
+
+        public static void RenderDebugLine(
+            Vec3 position,
+            Vec3 direction,
+            uint color,
+            bool depthCheck,
+            float time)
+        {
+            try
+            {
+                Type t = Type.GetType(
+                    "TaleWorlds.Engine.EngineApplicationInterface, TaleWorlds.Engine");
+                object debug = t?.GetField("IDebug", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)
+                    ?.GetValue(null);
+                debug?.GetType()
+                    .GetMethod("RenderDebugLine")
+                    ?.Invoke(debug, new object[] { position, direction, color, depthCheck, time });
+            }
+            catch { }
+        }
+
+        #endregion
+
+        #region ===== 新增：一次性弹道计算与显示 (投射物弹道) =====
+        public static void ClearMissileTrajectory(int missileIndex)
+        {
+            if (!SkillSystemBehavior.MissileTrajectoryLines.TryGetValue(missileIndex, out var line)) return;
+
+            // 清理 GameEntity 轨迹点
+            foreach (var e in line.Values)
+            {
+                // 归还 GameEntity 到池中
+                SkillSystemBehavior.ReturnGameEntityToPool(e);
+            }
+            line.Clear(); // 清空字典，但保留字典本身
+
+            SkillSystemBehavior.MissileTrajectoryLines.Remove(missileIndex);
+        }
+        public static void UpdateMissileTrajectory(int missileIndex, Vec3 startPos, Vec3 direction, float speed, float airFriction, float maxTime = 3.0f, float timeStep = 0.1f)
+        {
+            // 为这个 Missile 创建或获取其专属的 GameEntity 容器
+            var missileLine = SkillSystemBehavior.GetOrCreateMissileLine(missileIndex);
+
+            // 计算轨迹点并显示
+            float timeKeyOffset = 0f; // 可以根据需要调整
+            var trajectoryPoints = SimulateTrajectoryForMissile(startPos, direction, speed, airFriction, timeStep, maxTime, timeKeyOffset, missileLine, 0xFF00FF00u); // 绿色
+
+            // 将计算出的轨迹点传递给 SkillSystemBehavior 用于持续 DebugLine 绘制
+            if (trajectoryPoints != null)
+            {
+                SkillSystemBehavior.StoreMissileTrajectoryPoints(missileIndex, trajectoryPoints);
+            }
+        }
+
+        private static List<Vec3> SimulateTrajectoryForMissile(Vec3 startPos, Vec3 direction, float speed, float airFriction, float timeStep, float maxTime, float timeKeyOffset, Dictionary<float, GameEntity> missileLine, uint color)
+        {
+            // 检查是否至少有一种显示方式开启
+            if (!ProjectileTrajectorySettingsManager.Settings.UseGameEntityDisplay && !ProjectileTrajectorySettingsManager.Settings.UseDebugLineDisplay)
+            {
+                // 如果两种显示方式都关闭，则直接返回，不进行任何计算或绘制
+                return null; // 返回 null 表示没有计算轨迹点
+            }
+
+            direction.Normalize();
+            float originalAirFriction = _airFriction; // 保存原始值
+            _airFriction = airFriction; // 设置当前计算使用的空气阻力
+
+            Vec3 previousPos = startPos; // 初始化上一个点为起点
+            List<Vec3> calculatedPoints = new List<Vec3>(); // 存储计算出的点
+
+            for (float t = 0f; t <= maxTime; t += timeStep)
+            {
+                Vec3 currentPos = CalculatePosition(startPos, direction, speed, t, airFriction);
+                calculatedPoints.Add(currentPos); // 添加到列表
+
+                // 根据设置选择显示方式
+                if (ProjectileTrajectorySettingsManager.Settings.UseGameEntityDisplay)
+                {
+                    // 使用 GameEntity 显示
+                    PlaceGameEntityMarker(currentPos, t + timeKeyOffset, missileLine, color);
+                }
+
+                if (ProjectileTrajectorySettingsManager.Settings.UseDebugLineDisplay)
+                {
+                    // 使用 DebugLine 显示线段 (即时绘制)
+                    DrawDebugLineSegment(previousPos, currentPos - previousPos, color, 0f);
+                }
+
+                previousPos = currentPos; // 更新上一个点
+            }
+
+            _airFriction = originalAirFriction; // 恢复原始值
+
+            return calculatedPoints; // 返回计算好的点列表
+        }
+        #endregion
+        // 新增：专门绘制移动目标预瞄线
+        // 注意：这个函数和 UpdateTrajectory 是平行的，互不干扰
+        public static void DrawLeadTrajectory(Agent player, Vec3 targetPredictedPos, float speed)
+        {
+            if (!ProjectileTrajectorySettingsManager.Settings.UseDebugLineDisplay &&
+                !ProjectileTrajectorySettingsManager.Settings.UseGameEntityDisplay)
+                return;
+
+            // 1. 计算从玩家眼睛到预测点的方向
+            Vec3 direction = targetPredictedPos - player.GetEyeGlobalPosition();
+            direction.Normalize();
+
+            // 2. 复用原有的 SimulateTrajectory 逻辑
+            // 关键区别：这里我们传入的是 LeadPredictionLine 字典，而不是 WoW_Line
+            // 这样它就不会覆盖你原本的弹道线
+            SimulateTrajectory(
+                player.GetEyeGlobalPosition(),
+                direction,
+                speed,
+                0.3f, // 空气阻力（可调）
+                4.8f, // 最大时间
+                0.15f, // 步长
+                0f,
+                customLine: SkillSystemBehavior.LeadPredictionLine, // 核心：使用独立的字典存储
+                0xFFFF0000u // 颜色：建议用红色 0xFFFF0000u 区分原本的青色
+            );
+        }
+        // 在 ProjectileTrajectorySystem 类中添加
+        public static Vec3 CalculateLeadPosition(Agent player, Agent target, float projectileSpeed)
+        {
+            Vec3 shooterPos = player.GetEyeGlobalPosition();
+            Vec3 targetCurrentPos = target.GetEyeGlobalPosition();
+
+            // 1. 获取目标速度 (需要 SkillSystemBehavior 中维护的数据)
+            Vec3 targetVelocity = Vec3.Zero;
+            if (SkillSystemBehavior.TrackedAgents.TryGetValue(target, out var data))
+            {
+                targetVelocity = data.Velocity;
+            }
+
+            // 2. 初始时间估算 (距离 / 速度)
+            float horizontalDistance = (targetCurrentPos.AsVec2 - shooterPos.AsVec2).Length;
+            float timeToTarget = horizontalDistance / projectileSpeed;
+
+            // 3. 迭代拟合 (核心算法)
+            // 原理：因为要打提前量，枪口抬起导致弹道变长 -> 飞行时间变长 -> 需要更多提前量
+            float previousTime = 0;
+            float currentTime = timeToTarget;
+            int iterations = 0;
+            const int maxIterations = 5;
+
+            while (TaleWorlds.Library.MathF.Abs(previousTime - currentTime) > 0.001f && iterations < maxIterations)
+            {
+                previousTime = currentTime;
+
+                // 预测目标的新位置 = 当前位置 + 速度 * 预估时间
+                Vec3 predictedTargetPos = targetCurrentPos + (targetVelocity * previousTime);
+
+                // 重新计算弹道飞行时间
+                // 这里简化了，实际应考虑抛物线。为了精确，我们调用抛物线解算函数
+                Vec3 shotDir = CalculateProjectileFiringSolution(shooterPos, predictedTargetPos, projectileSpeed, 9.81f);
+
+                if (shotDir!=Vec3.Invalid && shotDir!=Vec3.Zero)
+                {
+                    // 如果无解（比如距离太远），回退到直线计算
+                    Vec3 simpleDelta = predictedTargetPos - shooterPos;
+                    currentTime = simpleDelta.AsVec2.Length / projectileSpeed;
+                }
+                else
+                {
+                    // 这里需要一个更精确的飞行时间估算
+                    // 作为简化，我们使用直线距离除以速度分量
+                    // (注：如果要极致精确，需要积分计算抛物线飞行时间，这里先用简化版)
+                    Vec3 velocityVector = shotDir * projectileSpeed;
+                    float airTime = (velocityVector.z + TaleWorlds.Library.MathF.Sqrt(velocityVector.z * velocityVector.z + 2 * 9.81f * (shooterPos.z - predictedTargetPos.z))) / 9.81f;
+                    currentTime = airTime;
+                }
+            }
+
+            // 4. 返回最终预测点
+            return targetCurrentPos + (targetVelocity * currentTime);
+        }
+
+        // 复用你提供的抛物线解算函数 (放在 ProjectileTrajectorySystem 类中)
+        public static Vec3 CalculateProjectileFiringSolution(Vec3 start, Vec3 end, float speed, float gravity)
+        {
+            Vec2 horizontalDistance = new Vec2(end.x - start.x, end.y - start.y);
+            float horizontalRange = horizontalDistance.Length;
+            float verticalDistance = end.z - start.z;
+
+            float speedSquared = speed * speed;
+            float sqrtTerm = speedSquared * speedSquared - gravity * (gravity * horizontalRange * horizontalRange + 2 * verticalDistance * speedSquared);
+
+            if (sqrtTerm < 0.0f)
+            {
+                return Vec3.Invalid;
+            }
+
+            float sqrtValue = (float)Math.Sqrt(sqrtTerm);
+            float angle = (float)Math.Atan2(speedSquared - sqrtValue, gravity * horizontalRange);
+
+            Vec3 firingSolution = new Vec3(horizontalDistance.x, horizontalDistance.y, 0);
+            firingSolution.Normalize();
+            firingSolution *= (float)Math.Cos(angle) * speed;
+            firingSolution.z = (float)Math.Sin(angle) * speed;
+
+            // 注意：这里不要 Normalize()，保留速度矢量用于计算飞行时间
+            // 如果返回的是方向，才需要 Normalize。根据你的调用逻辑决定。
+            // firingSolution.Normalize(); 
+            return firingSolution;
+        }
+    }
+}
+========================================
+
+【SkillSystemBehavior.cs】
+﻿// 包含所有功能的主行为逻辑，包含 GameEntity 对象池
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using TaleWorlds.Core;
+using TaleWorlds.Engine;
+using TaleWorlds.Library;
+using TaleWorlds.MountAndBlade;
+using static TaleWorlds.Library.MathF;
+
+namespace ProjectileTrajectorySystem
+{
+    public partial class SkillSystemBehavior : MissionLogic
+    {
+        // --- 新增：移动目标预瞄系统 ---
+     // 用于存储预测弹道的 GameEntity
+        public static readonly Dictionary<float, GameEntity> LeadPredictionLine = new Dictionary<float, GameEntity>();
+
+        // 用于存储预测的落点标记（比如那个“石头”）
+        public static GameEntity PredictionMarker = null;
+
+        // 预测标记的资源路径（你提供的“石头”Mesh）
+        private const string PREDICTION_MESH = "mangonel_mapicon_projectile"; // 请确保这是你资源的实际名称
+                                                                              // 用于存储所有活跃敌人的运动数据（位置、速度）
+        public static readonly Dictionary<Agent, AgentMotionData> TrackedAgents = new Dictionary<Agent, AgentMotionData>();
+
+        // 运动数据的辅助类
+        public class AgentMotionData
+        {
+            public Vec3 LastPosition;
+            public Vec3 Velocity;
+            public float LastUpdateTime;
+        }                                           // --- 结束新增 ---
+        #region ===== 数据结构 =====
+
+        public class AgentMissileSpeedData
+        {
+            public Agent Agent;
+            public MissionWeapon Weapon;
+            public float MissileSpeed;
+        }
+
+        public static readonly Dictionary<int, List<AgentMissileSpeedData>> WoW_AgentMissileSpeedData = new();
+        public static readonly Dictionary<float, GameEntity> WoW_Line = new(); // 用于玩家/攻城弹道的 GameEntity 存储
+        public static readonly List<GameEntity> WoW_CustomGameEntity = new(); // 可能不再需要，或用于其他目的
+        public static readonly Dictionary<int, Dictionary<float, GameEntity>> EnemyTrajectoryLines = new(); // 用于敌人弹道
+
+        // --- 新增：存储 Missile 轨迹点用于 DebugLine 持续显示 ---
+        public static readonly Dictionary<int, List<Vec3>> StoredMissileTrajectoryPoints = new();
+        // --- 新增：描边缓存优化 ---
+        private static Dictionary<Agent, uint?> _contourCache = new Dictionary<Agent, uint?>();
+
+        // --- 新增：Missile 弹道数据 ---
+        public static readonly Dictionary<int, Dictionary<float, GameEntity>> MissileTrajectoryLines = new(); // Key: Missile Index, Value: Its trajectory GameEntities
+
+        // --- 新增：GameEntity 对象池 ---
+        private static Stack<GameEntity> _gameEntityPool = new Stack<GameEntity>();
+
+        // --- 新增：GameEntity 颜色缓存优化 ---
+        public static Dictionary<GameEntity, uint> GameEntityColorCache = new Dictionary<GameEntity, uint>();
+
+        public static Dictionary<(int agentIndex, String weaponId, String ammoId), float> ProjectileSpeedCache = new Dictionary<(int, String, String), float>();
+        // --- 结束新增 ---
+        // ===== Slow Motion 状态 =====
+        private bool _slowMoActive = false;
+        private float _currentTimeScale = 1f;
+        #endregion
+
+        #region ===== 敌人追踪 =====
+
+        private const int MaxTrackedEnemies = 10; // 与设置同步
+        private readonly List<Agent> _trackedEnemies = new(MaxTrackedEnemies);
+
+        #endregion
+
+        #region ===== Alpha 虚化系统 =====
+        // -----------------------
+        // 可配置参数（按需微调）
+        // -----------------------
+        private const float LOOK_UP_THRESHOLD = 0.2f; // 
+        private const float DEFAULT_ALPHA = 1.0f;
+        private const float BLUR_ALPHA = 0.03f;          // 目标虚化 alpha（可调）
+        private const float ALPHA_EPSILON = 0.01f;      // 小于该值视为无变化
+        private const float SMOOTHING_FACTOR_PER_TICK = 0.15f; // 每帧平滑因子（没有 dt 情况下的经验值）
+
+        // -----------------------
+        // 缓存：避免每帧盲目调用 SetAlpha
+        // key = GameEntity.GetHashCode()
+        // -----------------------
+        private static readonly Dictionary<int, WeakGameEntity> _entityById = new Dictionary<int, WeakGameEntity>();
+        private static readonly Dictionary<int, float> _currentAlphaById = new Dictionary<int, float>();
+        private static readonly Dictionary<int, float> _targetAlphaById = new Dictionary<int, float>();
+
+        // -----------------------
+        // 注册并设置目标 alpha（不立即写入实际实体）
+        // -----------------------
+        private static int RegisterEntityForAlpha(WeakGameEntity ge)
+        {
+            if (ge == null) return 0;
+            int id = ge.GetHashCode();
+            if (!_entityById.ContainsKey(id))
+            {
+                _entityById[id] = ge;
+                if (!_currentAlphaById.ContainsKey(id)) _currentAlphaById[id] = DEFAULT_ALPHA;
+                if (!_targetAlphaById.ContainsKey(id)) _targetAlphaById[id] = DEFAULT_ALPHA;
+            }
+            return id;
+        }
+
+        private static void SetEntityTargetAlpha(WeakGameEntity ge, float targetAlpha)
+        {
+            if (ge == null) return;
+            int id = RegisterEntityForAlpha(ge);
+            _targetAlphaById[id] = targetAlpha;
+        }
+
+        private static void SetAgentTargetAlpha(Agent agent, float targetAlpha)
+        {
+            if (agent == null) return;
+            try
+            {
+                var av = agent.AgentVisuals;
+                if (av == null) return;
+                // AgentVisuals.GetEntity() 在多数版本可用
+                var ge = av.GetEntity().WeakEntity;
+                if (ge != null)
+                {
+                    SetEntityTargetAlpha(ge, targetAlpha);
+                }
+            }
+            catch
+            {
+                // 防守性空实现以保证兼容性
+            }
+        }
+        private static readonly Dictionary<RangedSiegeWeapon, List<WeakGameEntity>> _siegeChildEntities = new();
+        public static void SetSiegeTargetAlpha(RangedSiegeWeapon siege, float targetAlpha)
+        {
+            if (siege == null) return;
+            try
+            {
+                // 第一次调用时收集所有子实体
+                if (!_siegeChildEntities.ContainsKey(siege))
+                {
+                    var entities = new List<WeakGameEntity>();
+
+                    // 获取最高父实体
+                    WeakGameEntity highestParent = GetHighestParent(siege.GameEntity);
+                    if (highestParent != null)
+                    {
+                        // 添加最高父实体
+                        entities.Add(highestParent);
+                        // 递归获取所有子实体
+                        CollectChildren(highestParent, entities);
+                    }
+                    _siegeChildEntities[siege] = entities;
+                }
+                // 遍历所有相关实体设置 alpha
+                foreach (var entity in _siegeChildEntities[siege])
+                {
+                    try
+                    {
+                        if (entity != null && !WeakGameEntity.Invalid.Equals(entity))
+                            entity.SetAlpha(targetAlpha);
+                    }
+                    catch { /* ignore */ }
+                }
+            }
+            catch { /* ignore */ }
+        }
+
+        // 辅助方法 - 递归收集子实体
+        private static void CollectChildren(WeakGameEntity parent, List<WeakGameEntity> children)
+        {
+            if (parent == null || WeakGameEntity.Invalid.Equals(parent)) return;
+
+            try
+            {
+                var ge = GameEntity.CreateFromWeakEntity(parent);
+                if (ge == null) return;
+
+                // 先添加当前父实体（如果还没添加）
+                if (!children.Contains(parent))
+                {
+                    children.Add(parent);
+                }
+
+                foreach (var child in ge.GetChildren())
+                {
+                    if (ge != null)
+                    {
+                        var weak = child.WeakEntity;
+                        if (!children.Contains(weak))
+                        {
+                            children.Add(weak);
+                            CollectChildren(weak, children);
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        // 新增方法：获取最高父实体
+        private static WeakGameEntity GetHighestParent(WeakGameEntity entity)
+        {
+            if (entity == null || WeakGameEntity.Invalid.Equals(entity))
+                return WeakGameEntity.Invalid;
+
+            // 递归找到最高父实体
+            while (entity.Parent != null && !WeakGameEntity.Invalid.Equals(entity.Parent))
+            {
+                entity = entity.Parent;
+            }
+
+            return entity;
+        }
+
+        // -----------------------
+        // 平滑并应用 alpha 到实体（每帧调用）
+        // -----------------------
+        private static void UpdateAlphaSmoothing()
+        {
+            // 采用快照键集合，防止在迭代中修改字典导致异常
+            var ids = new List<int>(_targetAlphaById.Keys);
+            foreach (int id in ids)
+            {
+                // 若实体不存在则清理缓存
+                if (!_entityById.TryGetValue(id, out var ge) || ge == null)
+                {
+                    _targetAlphaById.Remove(id);
+                    _currentAlphaById.Remove(id);
+                    _entityById.Remove(id);
+                    continue;
+                }
+
+                float target = _targetAlphaById.ContainsKey(id) ? _targetAlphaById[id] : DEFAULT_ALPHA;
+                float current = _currentAlphaById.ContainsKey(id) ? _currentAlphaById[id] : DEFAULT_ALPHA;
+
+                float factor = SMOOTHING_FACTOR_PER_TICK; // 如有 dt，可以改为 MathF.Clamp(dt * speed, 0, 1)
+
+                float next = current + (target - current) * factor;
+
+                // 只有出现明显变化才调用 SetAlpha
+                if (Math.Abs(next - current) > ALPHA_EPSILON)
+                {
+                    try
+                    {
+                        // 防守性检查
+                        if (!ge.IsGhostObject())
+                        {
+                            ge.SetAlpha(next);
+                        }
+                    }
+                    catch
+                    {
+                        // 引擎版本差异导致失败时忽略，避免崩溃
+                    }
+                    _currentAlphaById[id] = next;
+                }
+                else
+                {
+                    // 变化很小，认为已经到达目标
+                    _currentAlphaById[id] = target;
+
+                    // 若目标为默认 alpha，则清理缓存，减少维护开销
+                    if (Math.Abs(target - DEFAULT_ALPHA) <= ALPHA_EPSILON)
+                    {
+                        _targetAlphaById.Remove(id);
+                        _currentAlphaById.Remove(id);
+                        _entityById.Remove(id);
+                    }
+                }
+            }
+        }
+
+        // -----------------------
+        // 清理：恢复所有被管理实体的 alpha（在 Mission 结束或卸载时调用）
+        // -----------------------
+        private static void RestoreAllAlphas()
+        {
+            var ids = new List<int>(_entityById.Keys);
+            foreach (var id in ids)
+            {
+                if (_entityById.TryGetValue(id, out var ge) && ge != null)
+                {
+                    try { ge.SetAlpha(DEFAULT_ALPHA); } catch { }
+                }
+                _entityById.Remove(id);
+                _currentAlphaById.Remove(id);
+                _targetAlphaById.Remove(id);
+            }
+        }
+
+        #endregion
+
+        public override MissionBehaviorType BehaviorType => MissionBehaviorType.Other;
+
+        public override void OnMissileHit(Agent attacker, Agent victim, bool isCanceled, AttackCollisionData collisionData)
+        {
+            // 使用 AffectorWeaponSlotOrMissileIndex 来清理轨迹
+            int missileIndex = collisionData.AffectorWeaponSlotOrMissileIndex;
+            if (missileIndex >= 0) // 确保是 Missile 的索引 (>=0)，而不是装备槽 (-1)
+            {
+                // 1. 清理 GameEntity 轨迹 (如果设置开启)
+                if (ProjectileTrajectorySettingsManager.Settings.EnableTrajectory && ProjectileTrajectorySettingsManager.Settings.MissileTrajectory && ProjectileTrajectorySettingsManager.Settings.UseGameEntityDisplay)
+                {
+                    ProjectileTrajectorySystem.ClearMissileTrajectory(missileIndex);
+                }
+
+                // 2. 清理 DebugLine 轨迹点 (如果设置开启)
+                if (ProjectileTrajectorySettingsManager.Settings.EnableTrajectory && ProjectileTrajectorySettingsManager.Settings.MissileTrajectory && ProjectileTrajectorySettingsManager.Settings.UseDebugLineDisplay)
+                {
+                    ClearStoredMissileTrajectoryPoints(missileIndex); // 调用本地方法清理存储的点
+                }
+            }
+        }
+
+        public override void OnAgentShootMissile(Agent shooterAgent, EquipmentIndex weaponIndex, Vec3 position, Vec3 velocity, Mat3 orientation, bool hasRigidBody, int forcedMissileIndex)
+        {
+            base.OnAgentShootMissile(shooterAgent, weaponIndex, position, velocity, orientation, hasRigidBody, forcedMissileIndex);
+            debugString2 =
+                shooterAgent.GetEyeGlobalPosition().X.ToString() + " " +
+                shooterAgent.GetEyeGlobalPosition().Y.ToString() + " " +
+                shooterAgent.GetEyeGlobalPosition().Z.ToString() + " " +
+                velocity.Length.ToString();
+            if (shooterAgent == Agent.Main)
+            {
+                InformationManager.DisplayMessage(new InformationMessage(debugString1));
+                InformationManager.DisplayMessage(new InformationMessage(debugString2));
+            }
+            // 检查设置是否启用投射物弹道
+            if (!ProjectileTrajectorySettingsManager.Settings.EnableTrajectory || !ProjectileTrajectorySettingsManager.Settings.MissileTrajectory)
+                return;
+
+            // 获取玩家代理对象
+            Agent playerAgent = Agent.Main;
+            if (playerAgent == null) return; // 防御性检查，确保玩家存在
+
+            // 判断是否是玩家发射或者敌人以玩家为目标的情况
+            bool isPlayerProjectile = shooterAgent == playerAgent;
+            bool isEnemyTargetingPlayer = shooterAgent != playerAgent
+                                           && shooterAgent.Team != null && playerAgent.Team != null // 检查 Team 是否为 null
+                                           && shooterAgent.Team.IsEnemyOf(playerAgent.Team)
+                                           && shooterAgent.GetTargetAgent() == playerAgent; // 检查 Target 是否为 null (GetTargetAgent 可能返回 null)
+
+            // 如果都不是，则不处理此投射物的轨迹
+            if (!isPlayerProjectile && !isEnemyTargetingPlayer)
+            {
+                return; // 直接返回，不执行后续的轨迹计算和显示
+            }
+
+            // 防御性检查
+            if (shooterAgent == null || !shooterAgent.IsActive())
+                return;
+
+
+            // 获取新生成的 Missile (假设列表末尾就是最新的)
+            var missilesList = Mission.Current.MissilesList;
+            if (missilesList.Count == 0) return; // 防御性检查
+
+            var newMissile = missilesList[missilesList.Count - 1];
+            if (newMissile == null) return; // 防御性检查
+
+            // 获取计算所需参数
+            var missileIndex = newMissile.Index;
+            var startPos = position; // 使用 OnAgentShootMissile 提供的 position
+            var speed = velocity.Length;
+            var direction = speed > 0 ? velocity.NormalizedCopy() : orientation.f; // 使用 velocity 方向，或 fallback 到 orientation
+            var airFriction = ProjectileTrajectorySystem.GetWeaponAirFriction(shooterAgent, out _); // 尝试获取发射者武器的空气阻力
+
+
+            // 获取武器和弹药
+            var weapon = shooterAgent.Equipment[weaponIndex];
+            if (!weapon.IsEmpty)
+            {
+                var weaponItem = weapon.Item;
+                var ammoItem = newMissile.Weapon.Item; // 对于弓/弩，通常是箭矢；对于投掷武器，可能是自身
+
+                int agentIndex = shooterAgent.Index;
+                String weaponId = weaponItem?.Name.ToString();
+                String ammoId = ammoItem?.Name.ToString();
+
+                var key = (agentIndex, weaponId, ammoId);
+
+                // 缓存初速（只记录首次，或可选择 always update）
+                if (!ProjectileSpeedCache.ContainsKey(key))
+                {
+                    ProjectileSpeedCache[key] = speed;
+                }
+            }
+            // 一次性计算并更新轨迹显示
+            ProjectileTrajectorySystem.UpdateMissileTrajectory(missileIndex, startPos, direction, speed, airFriction);
+        }
+
+        public override void OnMissionTick(float dt)
+        {
+            ProjectileTrajectorySettingsManager.ProcessPendingReload();
+
+            // 1. 敌人弹道预测 (旧版)
+            if (ProjectileTrajectorySettingsManager.Settings.EnableTrajectory && ProjectileTrajectorySettingsManager.Settings.EnemyTrajectory)
+            {
+                UpdateEnemyTracking();
+                UpdateEnemyTrajectories();
+            }
+
+            // 2. 玩家弹道
+            if (ProjectileTrajectorySettingsManager.Settings.EnableTrajectory && ProjectileTrajectorySettingsManager.Settings.PlayerTrajectory)
+            {
+                UpdatePlayerTrajectory();
+            }
+
+            // 3. 敌人高亮
+            if (ProjectileTrajectorySettingsManager.Settings.EnableTrajectory && ProjectileTrajectorySettingsManager.Settings.EnemyHighlight)
+            {
+                AddEnemyOutlineToAimingEnemies();
+            }
+
+            // 4. 投射物弹道 (持续显示 DebugLine)
+            if (ProjectileTrajectorySettingsManager.Settings.EnableTrajectory && ProjectileTrajectorySettingsManager.Settings.MissileTrajectory)
+            {
+                // 持续绘制所有已存储的导弹轨迹的 DebugLine
+                if (ProjectileTrajectorySettingsManager.Settings.UseDebugLineDisplay)
+                {
+                    foreach (var kvp in StoredMissileTrajectoryPoints)
+                    {
+                        ProjectileTrajectorySystem.DrawDebugLineTrajectory(kvp.Value, 0xFF00FF00u); // 绿色
+                    }
+                }
+            }
+
+            // 5. Alpha虚化系统更新
+            UpdateAlphaSmoothing();
+            // === 新增：移动目标预瞄逻辑 ===
+            // 只有在总开关开启、玩家弹道开启、且预瞄功能开启时才运行
+            if (ProjectileTrajectorySettingsManager.Settings.EnableTrajectory &&
+                ProjectileTrajectorySettingsManager.Settings.PlayerTrajectory &&
+                ProjectileTrajectorySettingsManager.Settings.EnableLeadPrediction)
+            {
+                UpdateLeadPrediction(Agent.Main);
+            }
+            // === 新增：移动目标预瞄逻辑 ===
+            // 添加这行：更新敌人运动数据
+            UpdateEnemyMotionData(dt);
+
+            HandleSlowMotion();
+
+        }
+
+        #region ===== 敌人逻辑 =====
+
+        private void UpdateEnemyTracking()
+        {
+            Agent player = Agent.Main;
+            if (player == null) return;
+
+            // 清理失效
+            for (int i = _trackedEnemies.Count - 1; i >= 0; i--)
+            {
+                if (!IsEnemyAimingPlayer(_trackedEnemies[i], player))
+                {
+                    ProjectileTrajectorySystem.ClearEnemyTrajectory(_trackedEnemies[i].Index);
+                    _trackedEnemies.RemoveAt(i);
+                }
+            }
+
+            if (_trackedEnemies.Count >= MaxTrackedEnemies) return;
+
+            foreach (Agent agent in Mission.Current.Agents)
+            {
+                if (_trackedEnemies.Count >= MaxTrackedEnemies) break;
+                if (_trackedEnemies.Contains(agent)) continue;
+                if (IsEnemyAimingPlayer(agent, player))
+                    _trackedEnemies.Add(agent);
+            }
+        }
+
+        private void UpdateEnemyTrajectories()
+        {
+            foreach (Agent enemy in _trackedEnemies)
+                ProjectileTrajectorySystem.UpdateEnemyTrajectory(enemy);
+        }
+
+        private static bool IsEnemyAimingPlayer(Agent agent, Agent player)
+        {
+            if (agent == null || player == null) return false;
+            if (!agent.IsActive()) return false;
+
+            // Team 判空（非常关键）
+            if (agent.Team == null || player.Team == null || !agent.Team.IsValid || !player.Team.IsValid) return false;
+            if (!agent.Team.IsEnemyOf(player.Team)) return false;
+
+            // 目标判空
+            Agent target = agent.GetTargetAgent();
+            if (target == null || target != player) return false;
+
+            // 武器判空
+            MissionWeapon weapon = agent.WieldedWeapon;
+            if (weapon.IsEmpty) return false;
+            if (!weapon.CurrentUsageItem.IsRangedWeapon) return false;
+
+            // 上半身动画：拉弓 / 瞄准阶段
+            return agent.GetCurrentActionStage(1) == Agent.ActionStage.AttackReady;
+        }
+
+        #endregion
+
+        #region ===== 玩家逻辑 =====
+        public static string debugString1 = "";
+        public static string debugString2 = "";
+
+
+        private static void UpdatePlayerTrajectory()
+        {
+            Agent player = Agent.Main;
+            if (player == null) return;
+
+            // 获取玩家当前武器
+            MissionWeapon weapon = player.WieldedWeapon;
+            bool hasValidWeapon = !weapon.IsEmpty;
+            bool isUsingRangedWeapon = hasValidWeapon && weapon.CurrentUsageItem.IsRangedWeapon;
+
+            // 获取设置：是否启用攻击准备阶段限制
+            bool enableAttackReadyRestriction = ProjectileTrajectorySettingsManager.Settings.EnableAttackReadyRestriction;
+            bool isAttacking = player.GetCurrentActionStage(1) == Agent.ActionStage.AttackReady;
+
+            // 根据设置决定是否需要攻击准备阶段的限制
+            bool shouldUpdateTrajectory = enableAttackReadyRestriction ? (isUsingRangedWeapon && isAttacking) : isUsingRangedWeapon;
+
+            // 1) 使用 agent.LookDirection 判断玩家是否"抬头"
+            // 获取设置：是否启用抬头虚化功能
+            bool enableLookUpBlur = ProjectileTrajectorySettingsManager.Settings.EnableLookUpBlur;
+            Vec3 lookDir = player.LookDirection;
+            bool playerLookingUp = lookDir.z > LOOK_UP_THRESHOLD && isUsingRangedWeapon && enableLookUpBlur;
+
+            // 2) 为玩家设置目标 alpha（抬头时虚化，根据设置决定）
+            if (enableLookUpBlur)
+            {
+                SetAgentTargetAlpha(player, playerLookingUp ? BLUR_ALPHA : DEFAULT_ALPHA);
+            }
+
+            // --- 分支1: 远程武器逻辑 ---
+            if (shouldUpdateTrajectory)
+            {
+                // 检查玩家是否处于远程武器的攻击动作中
+                // 根据设置决定是否仅在攻击准备阶段更新轨迹
+
+                // 3) 调用远程武器轨迹
+                try
+                {
+                    ProjectileTrajectorySystem.UpdateTrajectoryRangeWeapon(player);
+                }
+                catch
+                {
+                    // 守护：若调用失败不影响其他逻辑
+                }
+
+                // 4) 调用原始 UpdateTrajectory（仅用于远程武器）
+                try
+                {
+                    // 攻城武器为 null，因为当前分支处理的是手持远程武器
+                    ProjectileTrajectorySystem.UpdateTrajectory(player, null);
+                }
+                catch
+                {
+                    // ignore
+                }
+            }
+
+            // --- 分支2: 攻城武器逻辑 ---
+            if (  !isUsingRangedWeapon) // 使用非远程武器（可能是近战，也可能是操作攻城武器）
+            {
+                // 检查玩家是否正在使用攻城武器
+                WeakGameEntity wge = player.CurrentlyUsedGameObject?.GameEntity ?? player.GetSteppedEntity();
+                RangedSiegeWeapon siege = null;
+
+                // 查找父级实体中是否有 RangedSiegeWeapon 脚本
+                while (wge != null && !wge.HasScriptOfType<RangedSiegeWeapon>())
+                    wge = wge.Parent;
+
+                if (wge != null)
+                    siege = wge.GetFirstScriptOfType<RangedSiegeWeapon>();
+
+                // 5) 如果找到了攻城武器
+                if (siege != null)
+                {
+                    bool siegeLookingUp = false;
+                    try
+                    {
+                        // 直接使用引擎提供的方向（你所要求的）
+                        Vec3 siegeDir = ProjectileTrajectorySystem.GetSiegeShootingDirection(siege);
+                        siegeLookingUp = siegeDir.z > LOOK_UP_THRESHOLD;
+                    }
+                    catch
+                    {
+                        siegeLookingUp = false;
+                    }
+
+                    // 6) 为攻城武器设置目标 alpha（抬头时虚化，仅在第一人称时生效，根据设置决定）
+                    if (enableLookUpBlur)
+                    {
+                        SetSiegeTargetAlpha(siege, siegeLookingUp ? BLUR_ALPHA : DEFAULT_ALPHA);
+                    }
+
+                    // 7) 调用原始 UpdateTrajectory（仅用于攻城武器）
+                    try
+                    {
+                        ProjectileTrajectorySystem.UpdateTrajectory(player, siege);
+                    }
+                    catch
+                    {
+                        // ignore
+                    }
+                }
+            }
+        }
+
+        #endregion
+
+        #region ===== 描边逻辑 =====
+
+        private void AddEnemyOutlineToAimingEnemies()
+        {
+            Agent player = Agent.Main;
+            if (player == null) return;
+
+            // 收集当前所有符合条件的敌人
+            var aimingEnemies = new List<Agent>();
+            foreach (Agent agent in Mission.Current.Agents)
+            {
+                if (agent == null || !agent.IsActive() || agent == player) continue;
+                // 检查是否是敌人
+                if (agent.Team == null || agent.Team.TeamIndex == -1 || player.Team == null || !agent.Team.IsEnemyOf(player.Team)) continue;
+                // 检查是否使用远程武器
+                MissionWeapon weapon = agent.WieldedWeapon;
+                if (weapon.IsEmpty || !weapon.CurrentUsageItem.IsRangedWeapon) continue;
+                // 检查是否瞄准玩家UpdateTrajectory 
+                Agent target = agent.GetTargetAgent();
+                if (target == null || target != player) continue;
+                // 检查是否处于攻击动作（瞄准/拉弓阶段）
+                if (agent.GetCurrentActionStage(1) == Agent.ActionStage.AttackReady)
+                {
+                    aimingEnemies.Add(agent);
+                }
+            }
+
+            // 为符合条件的敌人添加描边（红色）
+            uint? targetColor = new Color(1f, 0f, 0f, 1f).ToUnsignedInteger();
+            foreach (var enemy in aimingEnemies)
+            {
+                ApplyOutline(enemy, targetColor);
+            }
+
+            // 清理不在瞄准列表中的敌人的描边和缓存
+            var toRemove = new List<Agent>();
+            foreach (var kvp in _contourCache)
+            {
+                if (!aimingEnemies.Contains(kvp.Key))
+                {
+                    // 移除描边
+                    kvp.Key.AgentVisuals.SetContourColor(null, true);
+                    toRemove.Add(kvp.Key);
+                }
+            }
+            foreach (var key in toRemove)
+            {
+                _contourCache.Remove(key);
+            }
+        }
+
+        private void ApplyOutline(Agent agent, uint? color)
+        {
+            // 通过缓存避免重复设置相同颜色（性能优化）
+            if (_contourCache.TryGetValue(agent, out var currentColor))
+            {
+                if (currentColor == color) return;
+            }
+            // 设置描边颜色
+            agent.AgentVisuals.SetContourColor(color, true);
+            _contourCache[agent] = color;
+
+            // 如果敌人骑马，同时给马添加描边
+            if (agent.MountAgent != null && agent.MountAgent.AgentVisuals != null)
+            {
+                if (_contourCache.TryGetValue(agent.MountAgent, out var mountColor))
+                {
+                    if (mountColor != color)
+                    {
+                        agent.MountAgent.AgentVisuals.SetContourColor(color, true);
+                        _contourCache[agent.MountAgent] = color;
+                    }
+                }
+                else
+                {
+                    agent.MountAgent.AgentVisuals.SetContourColor(color, true);
+                    _contourCache[agent.MountAgent] = color;
+                }
+            }
+        }
+
+        #endregion
+        // 新增方法：更新移动目标预瞄
+        private void UpdateLeadPrediction(Agent player)
+        {   
+            // 添加开关检查
+            if (!ProjectileTrajectorySettingsManager.Settings.EnableLeadPrediction)
+            {
+                ClearLeadPredictionLine();
+                return;
+            }
+            if (player == null || !player.IsActive()) return;
+
+            // 1. 获取玩家武器
+            EquipmentIndex weaponIndex = player.GetPrimaryWieldedItemIndex();
+            if (weaponIndex == EquipmentIndex.None)
+            {
+                // 没有武器时，清理预测线
+                ClearLeadPredictionLine();
+                return;
+            }
+
+            MissionWeapon weapon = player.Equipment[weaponIndex];
+            if (weapon.IsEmpty || !weapon.CurrentUsageItem.IsRangedWeapon)
+            {
+                ClearLeadPredictionLine();
+                return;
+            }
+
+            // 2. 选择目标（这里选择准星下的敌人，或者最近的敌人）
+            Agent targetEnemy = GetNearestEnemy(player);
+            if (targetEnemy == null)
+            {
+                ClearLeadPredictionLine();
+                return;
+            }
+
+            // 3. 获取弹速
+            float projectileSpeed = (float)weapon.GetModifiedMissileSpeedForCurrentUsage() *
+                                   player.AgentDrivenProperties.MissileSpeedMultiplier;
+
+            // 4. 核心计算：计算预测位置 (使用你提供的算法)
+            Vec3 predictedPosition = ProjectileTrajectorySystem.CalculateLeadPosition(player, targetEnemy, projectileSpeed);
+
+            if (predictedPosition == Vec3.Zero && predictedPosition == Vec3.Invalid)
+            {
+                ClearLeadPredictionLine();
+                return;
+            }
+
+            // 5. 绘制辅助标记（石头）
+            DrawPredictionMarker(predictedPosition);
+
+            // 6. 绘制辅助弹道线（关键：这条线是从玩家位置指向 predictedPosition）
+            ProjectileTrajectorySystem.DrawLeadTrajectory(player, predictedPosition, projectileSpeed);
+        }
+
+        // 简单的辅助函数：获取最近的敌人
+        private Agent GetNearestEnemy(Agent player)
+        {
+            Agent nearest = null;
+            float nearestDist = float.MaxValue;
+
+            foreach (Agent agent in Mission.Current.Agents)
+            {
+                if (agent == player || !agent.IsHuman || agent.IsFriendOf(Agent.Main)) continue;
+
+                float dist = (agent.Position - player.Position).LengthSquared;
+                if (dist < nearestDist)
+                {
+                    nearestDist = dist;
+                    nearest = agent;
+                }
+            }
+            return nearest;
+        }
+
+        // 绘制预测点的标记（石头）
+        private void DrawPredictionMarker(Vec3 pos)
+        {
+            // 复用对象池逻辑
+            if (PredictionMarker == null )
+            {
+                // 如果池子里没有，尝试从缓存获取或创建
+                // 这里为了简单，直接创建，实际应用中建议用你的对象池
+                try
+                {
+                    PredictionMarker = GameEntity.Instantiate(Mission.Current.Scene, PREDICTION_MESH, true);
+                }
+                catch { /* 如果模型找不到，忽略 */ }
+            }
+
+            if (PredictionMarker != null )
+            {
+                PredictionMarker.SetLocalPosition(pos);
+                // 设置大小
+                // PredictionMarker.SetScale(...);
+            }
+        }
+
+        // 清理预测标记
+        private void ClearLeadPredictionLine()
+        {
+            // 清理辅助线
+            foreach (var kv in LeadPredictionLine.ToList())
+            {
+                // 如果使用对象池，请 ReturnGameEntityToPool(kv.Value);
+                kv.Value?.Remove(0);
+            }
+            LeadPredictionLine.Clear();
+
+            // 隐藏或清理标记
+            if (PredictionMarker != null  )
+            {
+                PredictionMarker.SetLocalPosition(new Vec3(float.MaxValue)); // 移到天上去
+            }
+        }
+        #region ===== 工具方法 (GameEntity 池) =====
+        internal static GameEntity GetOrCreateGameEntity()
+        {
+            if (_gameEntityPool.Count > 0)
+            {
+                var entity = _gameEntityPool.Pop();
+                // 重置实体状态（例如，隐藏位置，确保它是干净的）
+                entity.SetLocalPosition(new Vec3(0, 0, 0)); // 移动到原点表示已激活
+                // 清除颜色缓存中对该实体的记录
+                GameEntityColorCache.Remove(entity);
+                return entity;
+            }
+            else
+            {
+                // 如果池为空，创建新实体
+                return GameEntity.CreateEmpty(Mission.Current.Scene);
+            }
+        }
+
+        internal static void ReturnGameEntityToPool(GameEntity entity)
+        {
+            if (entity != null)
+            {
+                // 将实体移回原点，表示闲置
+                entity.SetLocalPosition(new Vec3(0, 0, 0));
+                // 清除颜色缓存中对该实体的记录
+                GameEntityColorCache.Remove(entity);
+                _gameEntityPool.Push(entity);
+            }
+        }
+
+        internal static Dictionary<float, GameEntity> GetOrCreateMissileLine(int missileIndex)
+        {
+            if (!MissileTrajectoryLines.TryGetValue(missileIndex, out var line))
+            {
+                line = new Dictionary<float, GameEntity>();
+                MissileTrajectoryLines[missileIndex] = line;
+            }
+            return line;
+        }
+        // --- 新增：存储/获取/清理 Missile 轨迹点 ---
+        internal static void StoreMissileTrajectoryPoints(int missileIndex, List<Vec3> points)
+        {
+            if (points != null && points.Count > 0)
+            {
+                StoredMissileTrajectoryPoints[missileIndex] = new List<Vec3>(points); // 存储副本
+            }
+        }
+        internal static void ClearStoredMissileTrajectoryPoints(int missileIndex)
+        {
+            StoredMissileTrajectoryPoints.Remove(missileIndex);
+        }
+        #endregion
+
+        #region ===== 生命周期 =====
+
+        public override void OnCreated()
+        {
+            WoW_Line.Clear();
+            // WoW_CustomGameEntity.Clear(); // 可能不再需要
+            EnemyTrajectoryLines.Clear();
+            MissileTrajectoryLines.Clear(); // 清理 Missile 轨迹
+            StoredMissileTrajectoryPoints.Clear(); // 清理存储的轨迹点
+            _contourCache.Clear(); // 清理描边缓存
+            GameEntityColorCache.Clear(); // 清理 GameEntity 颜色缓存
+            _gameEntityPool.Clear();
+            ProjectileSpeedCache?.Clear();
+
+            // 清理 Alpha 虚化缓存
+            RestoreAllAlphas();
+        }
+
+        protected override void OnEndMission()
+        {
+            WoW_Line.Clear();
+            // WoW_CustomGameEntity.Clear(); // 可能不再需要
+            EnemyTrajectoryLines.Clear();
+            MissileTrajectoryLines.Clear(); // 清理 Missile 轨迹
+            StoredMissileTrajectoryPoints.Clear(); // 清理存储的轨迹点
+            _contourCache.Clear(); // 清理描边缓存
+            GameEntityColorCache.Clear(); // 清理 GameEntity 颜色缓存
+            _gameEntityPool.Clear();
+            // 清理所有描边 (以防万一)
+            foreach (var kvp in _contourCache)
+            {
+                kvp.Key.AgentVisuals.SetContourColor(null, true);
+            }
+            ProjectileSpeedCache?.Clear();
+
+            // 清理 Alpha 虚化缓存
+            RestoreAllAlphas();
+        }
+
+        #endregion
+        public bool TryGetCachedMissileSpeed(Agent agent, String weapon, String ammo, out float speed)
+        {
+            speed = 0f;
+            if (agent == null) return false;
+            var key = (agent.Index, weapon, ammo);
+
+            return ProjectileSpeedCache.TryGetValue(key, out speed);
+        }
+        // 新增方法：更新敌人运动数据
+        private void UpdateEnemyMotionData(float dt)
+        {
+            Agent player = Agent.Main;
+            if (player == null) return;
+
+            // 遍历所有代理，更新速度缓存
+            foreach (Agent agent in Mission.Current.Agents)
+            {
+                if (agent == player || !agent.IsActive() || !agent.IsHuman) continue;
+
+                Vec3 currentPos = agent.Position;
+                float currentTime = Mission.Current.CurrentTime; // 使用引擎时间
+
+                if (!TrackedAgents.ContainsKey(agent))
+                {
+                    TrackedAgents[agent] = new AgentMotionData
+                    {
+                        LastPosition = currentPos,
+                        LastUpdateTime = currentTime
+                    };
+                    continue;
+                }
+
+                AgentMotionData data = TrackedAgents[agent];
+                float timeDelta = currentTime - data.LastUpdateTime;
+
+                // 计算速度 (防除零)
+                if (timeDelta > 0.01f)
+                {
+                    data.Velocity = (currentPos - data.LastPosition) / timeDelta;
+                    data.LastUpdateTime = currentTime;
+                    data.LastPosition = currentPos;
+                }
+            }
+        }
+        private void HandleSlowMotion()
+        {
+            var settings = ProjectileTrajectorySettingsManager.Settings;
+            if (!settings.EnableSlowMotion)
+            {
+                RestoreTime();
+                return;
+            }
+
+            Agent player = Agent.Main;
+            if (player == null || !player.IsActive())
+            {
+                RestoreTime();
+                return;
+            }
+
+            // 1️⃣ 是否远程武器
+            var weapon = player.WieldedWeapon;
+            bool isRanged = !weapon.IsEmpty && weapon.CurrentUsageItem.IsRangedWeapon;
+
+            if (!isRanged)
+            {
+                RestoreTime();
+                return;
+            }
+
+            // 2️⃣ 是否在准备攻击
+            bool isAiming = player.GetCurrentActionStage(1) == Agent.ActionStage.AttackReady;
+
+            if (!isAiming)
+            {
+                RestoreTime();
+                return;
+            }
+
+            // 3️⃣ 是否有敌人
+            if (!HasNearbyEnemy(player, settings.SlowMoEnemyRadius))
+            {
+                RestoreTime();
+                return;
+            }
+
+            // 触发慢动作
+            ApplyTimeScale(settings.SlowMoTimeScale);
+        }
+        private bool HasNearbyEnemy(Agent player, float radius)
+        {
+            var enemies = new MBList<Agent>();
+
+            Mission.Current.GetNearbyEnemyAgents(
+                player.Position.AsVec2,
+                radius,
+                player.Team,
+                enemies);
+
+            return enemies.Count > 0;
+        }
+        // 正确做法：通过AddTimeSpeedRequest/RemoveTimeSpeedRequest管理请求
+        private void ApplyTimeScale(float scale)
+        {
+            scale = TaleWorlds.Library.MathF.Clamp(scale, 0.05f, 1f);
+
+            if (_slowMoActive && TaleWorlds.Library.MathF.Abs(_currentTimeScale - scale) < 0.001f)
+                return;
+
+            var mission = Mission.Current;
+            if (mission != null)
+            {
+                mission.AddTimeSpeedRequest(new Mission.TimeSpeedRequest(scale, 999));
+            }
+
+            _slowMoActive = true;
+            _currentTimeScale = scale;
+        }
+
+        private void RestoreTime()
+        {
+            // 1. 状态检查
+            if (!_slowMoActive)
+                return;
+
+            // 2. 恢复时间流速：通过移除请求实现
+            var mission = Mission.Current;
+            if (mission != null)
+            {
+                // 移除我们添加的特定请求
+                mission.RemoveTimeSpeedRequest(999);
+            }
+
+            // 3. 更新状态机
+            _slowMoActive = false;
+            _currentTimeScale = 1f;
+        }
+    }
+}
+========================================
+
+【SubModule.cs】
+﻿// SubModule.cs
+using HarmonyLib;
+using TaleWorlds.MountAndBlade;
+
+namespace ProjectileTrajectorySystem
+{
+    public class SubModule : MBSubModuleBase
+    {
+
+        protected override void OnSubModuleLoad()
+        {
+            base.OnSubModuleLoad();
+
+            // 先加载 XML 设置（或者生成默认 XML）
+            ProjectileTrajectorySettingsManager.Load();
+
+        }
+
+        protected override void OnSubModuleUnloaded()
+        {
+
+
+            base.OnSubModuleUnloaded();
+        }
+
+        public override void OnMissionBehaviorInitialize(Mission mission)
+        {
+            base.OnMissionBehaviorInitialize(mission);
+
+            // 添加自定义的 MissionBehavior 到当前任务
+            mission.AddMissionBehavior(new SkillSystemBehavior());
+            mission.AddMissionBehavior(new NavalDLCmBehavior());
+        }
+
+        protected override void OnBeforeInitialModuleScreenSetAsRoot()
+        {
+            base.OnBeforeInitialModuleScreenSetAsRoot();
+        }
+    }
+}
+========================================
+
+【UpdateLeadPrediction .cs】
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace ProjectileTrajectorySystem
+{
+ 
+}
+
+========================================

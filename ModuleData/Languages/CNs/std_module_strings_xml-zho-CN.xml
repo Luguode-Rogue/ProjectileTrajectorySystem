@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<base xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" type="string">
+  <tags>
+    <tag language="简体中文" />
+  </tags>
+  <strings>
+    <string id="PTS_DisplayName" text="弹道轨迹系统" />
+    <string id="PTS_001" text="启用弹道系统" />
+    <string id="PTS_H001" text="总开关：是否启用弹道可视化和敌人高亮。" />
+    <string id="PTS_G001" text="弹道显示设置" />
+    <string id="PTS_002" text="玩家弹道" />
+    <string id="PTS_H002" text="显示玩家远程武器的预测弹道。" />
+    <string id="PTS_003" text="敌人弹道" />
+    <string id="PTS_H003" text="当敌人瞄准玩家时，显示其预测的射击线。" />
+    <string id="PTS_004" text="实时投射物轨迹" />
+    <string id="PTS_H004" text="显示已射出的箭矢、弩箭等投射物的实际飞行路径。" />
+    <string id="PTS_G002" text="视觉效果" />
+    <string id="PTS_005" text="敌人高亮" />
+    <string id="PTS_H005" text="对正在瞄准玩家的敌方远程单位进行红色轮廓高亮。" />
+    <string id="PTS_G003" text="渲染方式" />
+    <string id="PTS_006" text="使用实体图标显示 (GameEntity)" />
+    <string id="PTS_H006" text="使用游戏物体图标（视觉效果差，游戏画面设置中开启DLSS时现实正常）。" />
+    <string id="PTS_007" text="使用调试线段显示 (DebugLine)" />
+    <string id="PTS_H007" text="使用简单的线段渲染（性能极高，但游戏画面设置中开启DLSS会导致显示异常）。" />
+    <string id="PTS_008" text="GE显示 - 玩家远程" />
+    <string id="PTS_H008" text="是否为玩家的普通远程武器启用实体图标显示。" />
+    <string id="PTS_009" text="GE显示 - 玩家攻城武器" />
+    <string id="PTS_H009" text="是否为玩家操作的攻城器械启用实体图标显示。" />
+    <string id="PTS_G004" text="性能设置" />
+    <string id="PTS_010" text="最大追踪敌人数量" />
+    <string id="PTS_H010" text="同时计算并显示预测弹道的最大敌人数量。" />
+    <string id="PTS_011" text="启用抬头虚化" />
+    <string id="PTS_H011" text="高角度仰射时虚化玩家模型，防止遮挡视野。" />
+    <string id="PTS_012" text="仅在准备攻击时显示" />
+    <string id="PTS_H012" text="只在拉弓或瞄准阶段显示弹道，平时隐藏。" />
+    <string id="PTS_015" text="移动目标位置预瞄" />
+    <string id="PTS_H015" text="【测试中的实验性功能，不建议开启】" />
+    <!-- 慢动作 -->
+    <string id="PTS_G005" text="慢动作" />
+    <string id="PTS_100" text="启用慢动作" />
+    <string id="PTS_H100" text="瞄准时若周围有敌人，则减慢时间流速。" />
+    <string id="PTS_101" text="敌人检测范围" />
+    <string id="PTS_H101" text="检测周围敌人的半径范围。" />
+    <string id="PTS_102" text="时间流速倍率" />
+    <string id="PTS_H102" text="慢动作时间缩放倍率。" />
+    <!-- 攻城器射击修正 -->
+    <string id="PTS_G006" text="攻城器射击修正" />
+    <string id="PTS_031" text="启用射击修正" />
+    <string id="PTS_H031" text="移除攻城器射击散布和速度随机化，投射物沿精确方向以固定速度发射。" />
+    <string id="PTS_032" text="智能跳过散弹" />
+    <string id="PTS_H032" text="多弹片攻城器（散弹类）跳过修正，保留原生随机行为。" />
+    <string id="PTS_033" text="调试文本输出" />
+    <string id="PTS_H033" text="攻城器开火时在信息栏显示射击参数。" />
+  </strings>
+</base>

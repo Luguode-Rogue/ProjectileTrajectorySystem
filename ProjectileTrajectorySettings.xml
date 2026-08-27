@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<ProjectileTrajectorySettings xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <EnableTrajectory>true</EnableTrajectory>
+  <PlayerTrajectory>true</PlayerTrajectory>
+  <EnemyTrajectory>true</EnemyTrajectory>
+  <MissileTrajectory>true</MissileTrajectory>
+  <EnemyHighlight>true</EnemyHighlight>
+  <UseGameEntityDisplay>false</UseGameEntityDisplay>
+  <UseDebugLineDisplay>true</UseDebugLineDisplay>
+  <UseGameEntityForPlayerRanged>false</UseGameEntityForPlayerRanged>
+  <UseGameEntityForPlayerSiege>false</UseGameEntityForPlayerSiege>
+  <MaxTrackedEnemiesLegacy>10</MaxTrackedEnemiesLegacy>
+  <EnableLookUpBlur>true</EnableLookUpBlur>
+  <EnableAttackReadyRestriction>true</EnableAttackReadyRestriction>
+  <EnableSlowMotion>false</EnableSlowMotion>
+  <SlowMoEnemyRadius>10</SlowMoEnemyRadius>
+  <SlowMoTimeScale>0.35</SlowMoTimeScale>
+  <EnableLeadPrediction>false</EnableLeadPrediction>
+  <SiegeWeaponShootFix>true</SiegeWeaponShootFix>
+  <SiegeWeaponSmartSkip>false</SiegeWeaponSmartSkip>
+  <SiegeWeaponDebugText>false</SiegeWeaponDebugText>
+  <EnableSiegeLandingView>true</EnableSiegeLandingView>
+  <SiegeLandingViewKey>V</SiegeLandingViewKey>
+</ProjectileTrajectorySettings>

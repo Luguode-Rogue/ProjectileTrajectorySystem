@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<base xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" type="string">
+  <tags>
+    <tag language="English" />
+  </tags>
+  <strings>
+    <string id="PTS_DisplayName" text="Projectile Trajectory System" />
+    <string id="PTS_001" text="Enable Trajectory System" />
+    <string id="PTS_H001" text="Master switch: whether to enable trajectory visualization and enemy highlighting." />
+    <string id="PTS_G001" text="Trajectory Display" />
+    <string id="PTS_002" text="Player Trajectory" />
+    <string id="PTS_H002" text="Show predicted trajectory for player ranged weapons." />
+    <string id="PTS_003" text="Enemy Trajectory" />
+    <string id="PTS_H003" text="Show predicted firing lines when enemies aim at the player." />
+    <string id="PTS_004" text="In-flight Missile Trajectory" />
+    <string id="PTS_H004" text="Show the actual flight path of fired arrows, bolts, etc." />
+    <string id="PTS_G002" text="Visual Effects" />
+    <string id="PTS_005" text="Enemy Highlight" />
+    <string id="PTS_H005" text="Highlight enemy ranged units aiming at the player with a red outline." />
+    
+    <!-- 渲染方式 (已更新 DLSS 提示) -->
+    <string id="PTS_G003" text="Rendering Method" />
+    <string id="PTS_006" text="Use GameEntity Icons" />
+    <string id="PTS_H006" text="Use game object icons (poor visuals, but displays correctly when DLSS is enabled in video settings)." />
+    <string id="PTS_007" text="Use DebugLine" />
+    <string id="PTS_H007" text="Use simple line rendering (extremely high performance, but enabling DLSS in video settings will cause display anomalies)." />
+    
+    <string id="PTS_008" text="GE Display - Player Ranged" />
+    <string id="PTS_H008" text="Enable GameEntity icons for player's handheld ranged weapons." />
+    <string id="PTS_009" text="GE Display - Player Siege" />
+    <string id="PTS_H009" text="Enable GameEntity icons for player-controlled siege engines." />
+    
+    <string id="PTS_G004" text="Performance" />
+    <string id="PTS_010" text="Max Tracked Enemies" />
+    <string id="PTS_H010" text="Maximum number of enemies to calculate trajectories for simultaneously." />
+    <string id="PTS_011" text="Enable Look-up Blur" />
+    <string id="PTS_H011" text="Blurs the player model when aiming upwards to avoid obstructing the view." />
+    <string id="PTS_012" text="Show Only When Ready" />
+    <string id="PTS_H012" text="Only show trajectory during the drawing or aiming phase." />
+    
+    <!-- 新增：移动目标预瞄词条 -->
+    <string id="PTS_015" text="Enable Lead Prediction" />
+    <string id="PTS_H015" text="Enable trajectory prediction for moving targets (lead targeting). EXPERIMENTAL FEATURE: Not recommended for general use." />
+    
+    <!-- Slow Motion -->
+    <string id="PTS_G005" text="Slow Motion" />
+    <string id="PTS_100" text="Enable Slow Motion" />
+    <string id="PTS_H100" text="Slow down time when aiming with enemies nearby." />
+    <string id="PTS_101" text="Enemy Radius" />
+    <string id="PTS_H101" text="Radius to detect nearby enemies." />
+    <string id="PTS_102" text="Time Scale" />
+    <string id="PTS_H102" text="Slow motion time scale multiplier." />
+    
+    <!-- Siege Weapon Shoot Fix -->
+    <string id="PTS_G006" text="Siege Weapon Shoot" />
+    <string id="PTS_031" text="Enable Shoot Fix" />
+    <string id="PTS_H031" text="Remove spread and speed randomization for siege engines. Projectiles fire along precise direction at fixed speed." />
+    <string id="PTS_032" text="Smart Skip Scatter" />
+    <string id="PTS_H032" text="Skip fix for multi-projectile siege engines (scatter type). They keep native random behavior." />
+    <string id="PTS_033" text="Debug Text Output" />
+    <string id="PTS_H033" text="Display shooting parameters in the info panel when a siege engine fires." />
+  </strings>
+</base>
